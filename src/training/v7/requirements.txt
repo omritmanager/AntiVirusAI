@@ -1,0 +1,16 @@
+# AntivirusAI V7 — Locked dependencies
+# DO NOT CHANGE these versions without testing!
+# Last verified: 2026-05-19
+
+lief==0.17.6
+ember==0.1.0
+lightgbm==4.5.0
+numpy==1.26.4
+scikit-learn==1.3.2
+pandas==2.2.0
+tqdm==4.67.3
+matplotlib==3.9.0
+shap==0.46.0
+optuna==3.6.0
+pyyaml==6.0.3
+scipy>=1.10,<1.13

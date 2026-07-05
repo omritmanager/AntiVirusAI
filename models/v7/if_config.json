@@ -1,0 +1,28 @@
+{
+  "created_at": "2026-06-02T22:24:13.239368",
+  "seed": 42,
+  "n_estimators": 300,
+  "contamination": 0.01,
+  "trained_on": "benign_only",
+  "n_training_samples": 22630,
+  "anomaly_threshold": 0.3694358641837102,
+  "val_metrics": {
+    "auc": 0.7713995391584552,
+    "tpr": 0.016433853738701727,
+    "fpr": 0.00928026397195298,
+    "tp": 120,
+    "fp": 45,
+    "fn": 7182,
+    "tn": 4804
+  },
+  "test_metrics": {
+    "auc": 0.7644822703845758,
+    "tpr": 0.018485553881966314,
+    "fpr": 0.010103092783505154,
+    "tp": 135,
+    "fp": 49,
+    "fn": 7168,
+    "tn": 4801
+  },
+  "note": "Higher score_samples value = more anomalous. Threshold applied to -score_samples (flipped). A file is flagged as anomaly if -score_samples >= anomaly_threshold."
+}

@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────
+# AntivirusAI V7 — .gitignore  (code-only repository)
+# Datasets, venv, secrets, and large binaries stay LOCAL only.
+# Rebuild them with: setup_environment.py  +  build_hash_db.py
+# ─────────────────────────────────────────────────────────────
+
+# ---- Secrets (NEVER commit) ----
+keys.csv
+*.key
+*.pem
+
+# ---- Local reorg / archive ----
+OLD/
+
+# ---- Virtual environments ----
+venv_v7/
+venv/
+.venv/
+env/
+
+# ---- Python caches ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ---- Editor / tooling ----
+.claude/
+.vscode/
+.idea/
+
+# ---- Large data & runtime artifacts (regenerated locally) ----
+data/
+HASH/
+quarantine/
+logs/
+evaluation/
+
+# ---- Loose large-data patterns (defense in depth) ----
+*.dat
+*.npy
+*.jsonl
+*.pth
+
+# ---- Models: exclude everything EXCEPT the single relevant model + its config
+models/*
+!models/v7/
+models/v7/*
+!models/v7/lgbm_v7_correct.pkl
+!models/v7/thresholds.json
+!models/v7/if_config.json

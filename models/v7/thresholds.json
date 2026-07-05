@@ -1,0 +1,12 @@
+{
+  "default": 0.5,
+  "best_f1": 0.40000000000000013,
+  "low_fpr": 0.40000000000000013,
+  "recommended": 0.40000000000000013,
+  "description": {
+    "default": "Standard 0.5 threshold",
+    "best_f1": "Maximizes F1 on val set (F1=0.9945)",
+    "low_fpr": "Best F1 while FPR<1% on val (F1=0.9945)",
+    "recommended": "Use this in production"
+  }
+}

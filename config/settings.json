@@ -1,0 +1,10 @@
+{
+  "description": "Behavioral defaults (spec §5/§6/§7). CLI flags override these at runtime.",
+  "use_if": false,
+  "whitelist_enabled": true,
+  "auto_quarantine": true,
+  "hash_compare": true,
+  "xor_quarantine": true,
+  "xor_key": 85,
+  "hash_db_path": "data/hashdb/baseline.sqlite"
+}
