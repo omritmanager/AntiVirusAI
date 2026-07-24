@@ -134,6 +134,22 @@ class Engine:
             return MLResult(ERROR, error=f"feature extraction failed: {e}")
         return self.classify_vector(vec, use_if=use_if)
 
+    def processed_vector(self, data: bytes):
+        """Return the exact 2381-dim feature vector the model predicts on
+        (temporal indices zeroed), or None on any failure. Used by the optional
+        explanation layer to attribute the decision; does NOT affect verdicts.
+        """
+        try:
+            if data is None or len(data) < config.MIN_FILE_BYTES:
+                return None
+            vec = np.array(self.extractor.feature_vector(data), dtype=np.float32)
+            if vec.shape[0] != config.EXPECTED_DIM or np.isnan(vec).any() or np.isinf(vec).any():
+                return None
+            vec[config.TEMPORAL_INDICES] = 0.0
+            return vec
+        except Exception:
+            return None
+
     def classify_file(self, path, use_if: bool = False) -> tuple[MLResult, str | None, int]:
         """Convenience: read a file, hash it, classify it.
 

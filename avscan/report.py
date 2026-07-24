@@ -42,6 +42,7 @@ def _result_to_dict(r) -> dict:
         "error": r.error,
         "quarantined": r.quarantined,
         "quarantine_path": r.quarantine_path,
+        "explanation": getattr(r, "explanation", None),
     }
 
 

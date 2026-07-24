@@ -140,11 +140,55 @@ def cmd_scan(args) -> int:
     if hash_db:
         hash_db.close()
 
+    if getattr(args, "explain", False):
+        _attach_explanations(scan)
+
     out = report_mod.write_report(scan, output_path=args.output)
     _print_summary(scan, out)
 
     flagged = scan.summary.malware + scan.summary.potential_zeroday
     return EXIT_MALWARE if flagged > 0 else EXIT_CLEAN
+
+
+def _attach_explanations(scan, cap: int = 10) -> None:
+    """Fill FileResult.explanation for flagged files via Gemini (needs a key).
+    Bounded by `cap` to limit API cost. Never raises."""
+    from .engine import get_engine, MLResult, MALWARE, POTENTIAL_ZERODAY
+    from . import explain
+
+    settings = config.load_settings()
+    if not settings.get("explain_enabled", True) or not config.get_gemini_api_key():
+        print("\nNOTE: --explain requested but no Gemini API key is set (or it is "
+              "disabled). Set GEMINI_API_KEY to enable explanations.")
+        return
+    flagged = [r for r in scan.results if r.ml_verdict in (MALWARE, POTENTIAL_ZERODAY)]
+    if not flagged:
+        return
+    engine = get_engine(load_if=True)
+    n = min(len(flagged), cap)
+    print(f"\nGenerating explanations for {n} flagged file(s) (Gemini)...")
+    for r in flagged[:cap]:
+        try:
+            with open(r.path, "rb") as f:
+                data = f.read()
+            ml = MLResult(r.ml_verdict, lgbm_prob=r.lgbm_prob, if_score=r.if_score)
+            out = explain.explain_bytes(engine, data, ml, settings=settings)
+            r.explanation = out.get("summary")
+            print(f"  {r.name}: {(r.explanation or '')[:110]}...")
+        except Exception:
+            continue
+
+
+def cmd_quickscan(args) -> int:
+    from . import quickscan as qs
+    from .engine import MALWARE, POTENTIAL_ZERODAY
+
+    res = qs.quick_scan(args.file, use_if=not args.no_if, do_explain=not args.no_explain)
+    if args.text:
+        qs._print_text(res)
+    else:
+        qs.show_popup(res)
+    return EXIT_MALWARE if res["ml_verdict"] in (MALWARE, POTENTIAL_ZERODAY) else EXIT_CLEAN
 
 
 def cmd_demo_zeroday(args) -> int:
@@ -292,8 +336,17 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--hash-compare", action="store_true", help="(default on) include comparison")
     sc.add_argument("--no-hash-compare", action="store_true", help="disable hash comparison")
     sc.add_argument("--output", default=None, help="report JSON path")
+    sc.add_argument("--explain", action="store_true",
+                    help="add a Gemini 'why' to flagged files (needs GEMINI_API_KEY)")
     sc.add_argument("--skip-selfcheck", action="store_true", help="skip startup self-check (warns)")
     sc.set_defaults(func=cmd_scan)
+
+    qs = sub.add_parser("quickscan", help="scan ONE file and show a popup verdict + 'why'")
+    qs.add_argument("file", help="path to the file to scan")
+    qs.add_argument("--text", action="store_true", help="print result instead of a popup")
+    qs.add_argument("--no-explain", action="store_true", help="skip the Gemini explanation")
+    qs.add_argument("--no-if", action="store_true", help="disable the Isolation Forest layer")
+    qs.set_defaults(func=cmd_quickscan)
 
     dz = sub.add_parser("demo-zeroday", help="SHA-256 vs ML headline table")
     dz.add_argument("folder")

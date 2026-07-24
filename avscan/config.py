@@ -53,6 +53,7 @@ EVALUATION_DIR = ROOT / "evaluation"
 CONFIG_DIR = ROOT / "config"
 WHITELIST_JSON = CONFIG_DIR / "whitelist.json"
 SETTINGS_JSON = CONFIG_DIR / "settings.json"
+GEMINI_KEY_FILE = CONFIG_DIR / "gemini_key.txt"  # optional; git-ignored
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Validated inference constants (DO NOT CHANGE — see scan_folder_v7.py / spec §2)
@@ -83,6 +84,19 @@ REGRESSION_F1_MIN = 0.98
 # Quarantine neutralization (§6)
 XOR_KEY_DEFAULT = 0x55
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Gemini explanation layer (OPTIONAL, opt-in, uses the network).
+# This is an ADD-ON that produces a short human-readable "why this looks like
+# malware". It is completely separate from the ML verdict and the hash lookup —
+# it runs AFTER a verdict, NEVER changes it, and the core scan stays offline.
+# Privacy: only the verdict, probability, and ABSTRACT feature-group names are
+# sent — never the file bytes, file name, or path.
+# ─────────────────────────────────────────────────────────────────────────────
+GEMINI_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
 # Whitelist defaults (§5) — used only if config/whitelist.json is absent.
 DEFAULT_WHITELIST_PREFIXES = [
     r"C:\Windows\System32",
@@ -99,6 +113,11 @@ DEFAULT_SETTINGS = {
     "xor_quarantine": True,     # XOR-neutralize quarantined files (§6)
     "xor_key": XOR_KEY_DEFAULT,
     "hash_db_path": str(BASELINE_SQLITE),
+    # Gemini explanation layer (opt-in; needs an API key — see get_gemini_api_key)
+    "explain_enabled": True,        # try to produce a "why" for flagged files
+    "gemini_model": DEFAULT_GEMINI_MODEL,
+    "gemini_language": "he",        # explanation language ("he" Hebrew / "en" English)
+    "gemini_timeout": 15,           # seconds for the API call
 }
 
 
@@ -154,6 +173,32 @@ def load_settings() -> dict:
             if k in settings:
                 settings[k] = v
     return settings
+
+
+def get_gemini_api_key() -> str | None:
+    """Resolve the user's Gemini API key. NEVER hardcoded. Checked in order:
+    1. environment variable GEMINI_API_KEY  (recommended)
+    2. config/settings.json  "gemini_api_key"
+    3. config/gemini_key.txt  (git-ignored)
+    Returns None if none is set — the explanation layer then stays disabled."""
+    import os
+
+    key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if key:
+        return key
+    data = _read_json(SETTINGS_JSON)
+    if isinstance(data, dict):
+        k = (data.get("gemini_api_key") or "").strip()
+        if k:
+            return k
+    try:
+        if GEMINI_KEY_FILE.exists():
+            k = GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
+            if k:
+                return k
+    except Exception:
+        pass
+    return None
 
 
 # Convenience module-level values (loaded once at import; loaders stay available).

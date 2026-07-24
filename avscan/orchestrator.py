@@ -50,6 +50,7 @@ class FileResult:
     error: str | None = None
     quarantined: bool = False
     quarantine_path: str | None = None
+    explanation: str | None = None   # optional Gemini "why" (only if --explain)
 
     @property
     def ml_flagged(self) -> bool:

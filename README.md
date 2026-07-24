@@ -85,6 +85,10 @@ python -m avscan scan "C:\Windows\System32" --no-whitelist
 # The headline experiment: SHA-256 signatures vs ML on simulated zero-day samples
 python -m avscan demo-zeroday "C:\path\to\zeroday_samples"
 
+# Quick scan of ONE file, with a popup verdict + AI "why" (see below)
+python -m avscan quickscan "C:\path\to\file.exe"
+python -m avscan quickscan "C:\path\to\file.exe" --text   # headless, prints instead of popup
+
 # Quarantine management
 python -m avscan list-quarantine
 python -m avscan restore <sha256>        # or: restore all
@@ -93,7 +97,60 @@ python -m avscan restore <sha256>        # or: restore all
 **Exit codes:** `0` = clean, `1` = malware found, `2` = scan error / self-check failed.
 
 Useful flags: `--hash-db <path>`, `--no-hash-compare`, `--output <report.json>`,
-`--skip-selfcheck` (escape hatch; warns loudly).
+`--explain` (add a Gemini "why" to flagged files), `--skip-selfcheck`.
+
+---
+
+## AI explanation layer (Gemini) — "why does the model think this is malware?"
+
+An **optional** layer explains a verdict in plain language. It runs *after* the
+ML verdict, **never changes it**, and the core scan stays fully offline. It uses
+LightGBM **SHAP contributions** to find which EMBER feature groups pushed the
+decision toward malware, then asks Gemini to explain them.
+
+**Privacy:** only the verdict, probability, and abstract feature-group names
+(e.g. "byte-entropy patterns", "imported functions") are sent — **never the file
+bytes, file name, or path.** Uses only the Python standard library (`urllib`).
+
+Set your own Gemini API key (never committed):
+
+```bash
+setx GEMINI_API_KEY "your-key-here"          # recommended (Windows, per-user)
+# or put the key in  config/gemini_key.txt   (git-ignored)
+```
+
+Model/language are configurable in `config/settings.json` (`gemini_model`,
+`gemini_language` = `he`/`en`). Without a key it degrades gracefully to a local
+feature-group summary — the scan still works.
+
+## Right-click "Quick Scan" on any .exe
+
+Add an Explorer context-menu entry so you can right-click an executable and get a
+popup verdict (with the Gemini explanation if it looks malicious):
+
+```bash
+REM run with the project venv so the entry points at it; per-user, no admin needed
+venv_v7\Scripts\python.exe register_context_menu.py --register
+venv_v7\Scripts\python.exe register_context_menu.py --status
+venv_v7\Scripts\python.exe register_context_menu.py --unregister   REM to remove
+```
+
+`--register` sets up three ways to reach it, and `--unregister` removes them all:
+
+- **Right-click a .exe.** On Windows 11 the entry is under **"Show more options"**
+  (classic menu) — press **Shift+F10** or Shift+right-click to open it directly.
+- **Quick access (no menu): drag any file onto the "AntivirusAI Quick Scan"
+  desktop icon.**
+- **Send to:** right-click a file ▸ *Send to* ▸ *AntivirusAI Quick Scan*.
+
+The command is `pythonw.exe avscan\quickscan.py "<file>"` — a self-check +
+single-file scan + a Tkinter popup that shows a live "scanning…" screen, then the
+verdict, the plain-language explanation, and a **"Send to Quarantine"** button for
+flagged files. Re-run `--register` if you move the project folder.
+
+> Putting an entry in the Windows 11 **top-level** modern menu (not under "Show
+> more options") requires a packaged shell extension (MSIX / `IExplorerCommand`),
+> which a plain script cannot create — hence the desktop/Send-To shortcuts above.
 
 ### GUI
 
