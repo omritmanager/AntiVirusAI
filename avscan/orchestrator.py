@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import config
+from . import config, signature
 from .engine import Engine, get_engine, MALWARE, POTENTIAL_ZERODAY, SAFE, ERROR
 from .hashdb import HashDB, KNOWN_MALWARE, NOT_IN_DB
 
@@ -51,6 +51,10 @@ class FileResult:
     quarantined: bool = False
     quarantine_path: str | None = None
     explanation: str | None = None   # optional Gemini "why" (only if --explain)
+    # Authenticode layer (independent; never changes ml_verdict) — see signature.py
+    signature_status: str | None = None   # TRUSTED | UNSIGNED | UNTRUSTED | UNKNOWN
+    signature_signer: str | None = None   # e.g. 'Anthropic, PBC'
+    quarantine_skipped_reason: str | None = None
 
     @property
     def ml_flagged(self) -> bool:
@@ -151,8 +155,11 @@ def scan_folder(
     zeroday_hashes: set[str] | None = None,
     progress_cb: Callable[[int, int, Path], None] | None = None,
     flagged_cb: Callable[[FileResult], None] | None = None,
+    result_cb: Callable[[FileResult], None] | None = None,
     error_cb: Callable[[str], None] | None = None,
     on_malware: Callable[[FileResult], tuple[bool, str | None]] | None = None,
+    check_signature: bool = True,
+    trust_signed: bool = True,
 ) -> ScanResult:
     """Scan `folder` and return a ScanResult.
 
@@ -160,8 +167,16 @@ def scan_folder(
     use_if          : consult the Isolation Forest second layer.
     hash_db         : a HashDB; if None and hash_compare, the default DB is opened.
     zeroday_hashes  : if given, the headline block is computed over these hashes.
+    result_cb       : optional callback fired for EVERY scanned (non-whitelisted)
+                      file, in scan order — for a UI that wants to grow its
+                      table live rather than only after the scan finishes.
+                      flagged_cb fires only for MALWARE/POTENTIAL_ZERODAY.
     on_malware      : optional callback to quarantine MALWARE files; returns
                       (quarantined, quarantine_path).
+    check_signature : verify Authenticode on flagged files (recorded only).
+    trust_signed    : do not AUTO-quarantine a MALWARE file whose signature is
+                      valid and trusted. The verdict is unchanged either way —
+                      this gates the action, not the classification.
     """
     folder = Path(folder)
     scan_id = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -234,17 +249,34 @@ def scan_folder(
         if fr.comparison_tag in tag_counts:
             tag_counts[fr.comparison_tag] += 1
 
+        # Authenticode layer (independent) — only for flagged files, since that
+        # is where it matters and it keeps clean scans fast. It NEVER feeds back
+        # into the ML verdict; it only gates the quarantine ACTION below.
+        if check_signature and fr.ml_flagged:
+            sig = signature.verify(fr.path)
+            fr.signature_status = sig.status
+            fr.signature_signer = sig.signer
+
         # Action: quarantine MALWARE only (POTENTIAL_ZERODAY is reported, not moved).
         if fr.ml_verdict == MALWARE and on_malware is not None:
-            try:
-                quarantined, qpath = on_malware(fr)
-                fr.quarantined, fr.quarantine_path = quarantined, qpath
-            except Exception as e:  # quarantine failure must not abort the scan
-                if error_cb:
-                    error_cb(f"quarantine failed for {fr.path}: {e}")
+            if trust_signed and fr.signature_status == signature.TRUSTED:
+                # Validly signed by a chain Windows trusts -> report, do not move.
+                # The model has a known false-positive rate on signed installers,
+                # and quarantining one breaks a legitimate program.
+                fr.quarantine_skipped_reason = (
+                    f"validly signed by {fr.signature_signer or 'a trusted publisher'}")
+            else:
+                try:
+                    quarantined, qpath = on_malware(fr)
+                    fr.quarantined, fr.quarantine_path = quarantined, qpath
+                except Exception as e:  # quarantine failure must not abort the scan
+                    if error_cb:
+                        error_cb(f"quarantine failed for {fr.path}: {e}")
 
         if fr.ml_flagged and flagged_cb:
             flagged_cb(fr)
+        if result_cb:
+            result_cb(fr)
 
         results.append(fr)
 
@@ -274,6 +306,8 @@ def scan_folder(
         "whitelist_enabled": whitelist_enabled,
         "hash_compare": hash_compare,
         "hash_active": hash_active,
+        "check_signature": check_signature,
+        "trust_signed": trust_signed,
     }
     return ScanResult(str(folder), scan_id, started_at, finished_at, duration,
                       summary, results, hash_comparison, options)

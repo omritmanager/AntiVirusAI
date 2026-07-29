@@ -42,6 +42,12 @@ def _result_to_dict(r) -> dict:
         "error": r.error,
         "quarantined": r.quarantined,
         "quarantine_path": r.quarantine_path,
+        # Authenticode layer — recorded side by side with the ML verdict, which
+        # it never changes. quarantine_skipped_reason explains a MALWARE verdict
+        # that was deliberately left in place (validly signed).
+        "signature_status": getattr(r, "signature_status", None),
+        "signature_signer": getattr(r, "signature_signer", None),
+        "quarantine_skipped_reason": getattr(r, "quarantine_skipped_reason", None),
         "explanation": getattr(r, "explanation", None),
     }
 
@@ -65,6 +71,8 @@ def build_report_dict(scan: ScanResult, *, model_name: str = "lgbm_v7_correct.pk
             "whitelist_enabled": bool(opts.get("whitelist_enabled", True)),
             "hash_db": hash_db_path,
             "hash_compare_enabled": bool(opts.get("hash_compare", False)),
+            "signature_check_enabled": bool(opts.get("check_signature", False)),
+            "trust_signed": bool(opts.get("trust_signed", False)),
             "model": model_name,
         },
         "environment": gather_environment(),

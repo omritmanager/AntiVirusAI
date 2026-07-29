@@ -13,11 +13,6 @@ config/gemini_key.txt
 # ---- Local reorg / archive ----
 OLD/
 
-# ---- Virtual environments ----
-venv_v7/
-venv/
-.venv/
-env/
 
 # ---- Python caches ----
 __pycache__/
@@ -37,6 +32,12 @@ HASH/
 quarantine/
 logs/
 evaluation/
+reports/
+
+# ---- Virtual environments (rebuild with install_environment.ps1) ----
+venv_v7/
+friend_venv/
+vmenv/
 
 # ---- Loose large-data patterns (defense in depth) ----
 *.dat
@@ -44,10 +45,4 @@ evaluation/
 *.jsonl
 *.pth
 
-# ---- Models: exclude everything EXCEPT the single relevant model + its config
-models/*
-!models/v7/
-models/v7/*
-!models/v7/lgbm_v7_correct.pkl
-!models/v7/thresholds.json
-!models/v7/if_config.json
+

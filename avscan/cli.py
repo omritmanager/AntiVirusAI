@@ -67,6 +67,11 @@ def _print_flagged(fr) -> None:
         print(f"  MALWARE           {fr.name:<45} p={fr.lgbm_prob:.3f} {tag}")
     elif fr.ml_verdict == "POTENTIAL_ZERODAY":
         print(f"  POTENTIAL_ZERODAY {fr.name:<45} if={fr.if_score:.3f} {tag}")
+    # Surface the signature counter-signal right where the user sees the alarm,
+    # so a likely false positive on a signed program is obvious immediately.
+    if fr.signature_status == "TRUSTED":
+        print(f"                    -> signed by {fr.signature_signer or 'a trusted publisher'}"
+              f"{' (NOT quarantined)' if fr.quarantine_skipped_reason else ''}")
 
 
 def _ensure_selfcheck(skip: bool) -> bool:
@@ -119,10 +124,16 @@ def cmd_scan(args) -> int:
         if do_quarantine else None
     on_malware = quarantine.quarantine_for_result if quarantine else None
 
+    settings = config.load_settings()
+    check_signature = settings.get("check_signature", True) and not args.no_signature
+    trust_signed = settings.get("trust_signed", True) and not args.no_trust_signed
+
     print(f"\nScanning: {folder}")
     print(f"  IF layer: {args.use_if} | whitelist: {not args.no_whitelist} | "
           f"hash-compare: {hash_compare} | action: "
-          f"{'quarantine' if do_quarantine else 'report-only'}\n")
+          f"{'quarantine' if do_quarantine else 'report-only'}")
+    print(f"  signature check: {check_signature} | "
+          f"skip quarantine for signed: {trust_signed}\n")
 
     progress = _Progress(enabled=True)
     scan = scan_folder(
@@ -135,6 +146,8 @@ def cmd_scan(args) -> int:
         flagged_cb=_print_flagged,
         error_cb=lambda e: None,
         on_malware=on_malware,
+        check_signature=check_signature,
+        trust_signed=trust_signed,
     )
     progress.close()
     if hash_db:
@@ -172,7 +185,11 @@ def _attach_explanations(scan, cap: int = 10) -> None:
             with open(r.path, "rb") as f:
                 data = f.read()
             ml = MLResult(r.ml_verdict, lgbm_prob=r.lgbm_prob, if_score=r.if_score)
-            out = explain.explain_bytes(engine, data, ml, settings=settings)
+            out = explain.explain_bytes(engine, data, ml, settings=settings,
+                                        hash_verdict=r.hash_verdict,
+                                        quarantined=r.quarantined,
+                                        signature_status=r.signature_status,
+                                        signature_signer=r.signature_signer)
             r.explanation = out.get("summary")
             print(f"  {r.name}: {(r.explanation or '')[:110]}...")
         except Exception:
@@ -335,6 +352,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--hash-db", default=None, help="path to baseline SQLite DB")
     sc.add_argument("--hash-compare", action="store_true", help="(default on) include comparison")
     sc.add_argument("--no-hash-compare", action="store_true", help="disable hash comparison")
+    sc.add_argument("--no-signature", action="store_true",
+                    help="skip Authenticode verification of flagged files")
+    sc.add_argument("--no-trust-signed", action="store_true",
+                    help="quarantine flagged MALWARE even if validly signed")
     sc.add_argument("--output", default=None, help="report JSON path")
     sc.add_argument("--explain", action="store_true",
                     help="add a Gemini 'why' to flagged files (needs GEMINI_API_KEY)")

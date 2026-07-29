@@ -113,6 +113,12 @@ DEFAULT_SETTINGS = {
     "xor_quarantine": True,     # XOR-neutralize quarantined files (§6)
     "xor_key": XOR_KEY_DEFAULT,
     "hash_db_path": str(BASELINE_SQLITE),
+    # Authenticode layer (avscan/signature.py). Independent of the ML verdict:
+    # it NEVER changes it, but a validly signed file is not AUTO-quarantined
+    # (still reported). Guards against the model's known false positives on
+    # signed installers/Go binaries. Set False to quarantine regardless.
+    "check_signature": True,    # verify Authenticode on flagged files
+    "trust_signed": True,       # skip auto-quarantine for validly signed files
     # Gemini explanation layer (opt-in; needs an API key — see get_gemini_api_key)
     "explain_enabled": True,        # try to produce a "why" for flagged files
     "gemini_model": DEFAULT_GEMINI_MODEL,
