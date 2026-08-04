@@ -80,7 +80,6 @@ def palette(mode: str = DEFAULT_MODE) -> dict:
 # signature.display_verdict() — not the raw ML verdict.
 _BADGES = {
     "MALWARE":           ("MALWARE",   "danger"),
-    "POTENTIAL_ZERODAY": ("ZERO-DAY?", "warn"),
     "SAFE":              ("SAFE",      "success"),
     "ERROR":             ("ERROR",     "neutral"),
     "SIGNED_SAFE":       ("SIGNED",    "success"),
@@ -163,6 +162,12 @@ QLabel#StatLabel {{
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.5px;
+}}
+QLabel#StatSub {{
+    color: {p['text_muted']};
+    font-size: 10px;
+    font-weight: 400;
+    margin-top: 2px;
 }}
 QLabel#CurrentFile {{ color: {p['text_muted']}; font-size: 11px; }}
 

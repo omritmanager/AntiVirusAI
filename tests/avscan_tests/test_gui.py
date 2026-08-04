@@ -69,21 +69,21 @@ def mk(name, verdict, *, prob=0.99, hash_verdict="NOT_IN_DB", tag=None,
         comparison_tag=tag, signature_status=sig_status, signature_signer=signer)
 
 
-def mk_scan(results, *, ml_only=0, malware=0, zeroday=0, safe=0, scanned=None):
+def mk_scan(results, *, malware=0, safe=0, scanned=None):
     return ScanResult(
         folder=r"C:\samples", scan_id="test", started_at="", finished_at="",
         duration_seconds=1.5,
         summary=ScanSummary(scanned=scanned if scanned is not None else len(results),
-                            malware=malware, potential_zeroday=zeroday, safe=safe),
+                            malware=malware, safe=safe),
         results=results,
-        hash_comparison={"files": {ML_ONLY_CATCH: ml_only}})
+        hash_comparison={"files": {ML_ONLY_CATCH: 0}})
 
 
 # ── construction ────────────────────────────────────────────────────────────
 def test_window_builds_all_core_widgets(win):
     for attr in ("path_edit", "scan_btn", "table", "progress", "filter_box",
                  "health_pill", "theme_btn", "cur_file", "status",
-                 "card_mlonly", "card_malware", "card_signed"):
+                 "card_scanned", "card_malware", "card_safe"):
         assert hasattr(win, attr), f"missing widget: {attr}"
     assert win.table.columnCount() == len(win.COLUMNS)
 
@@ -152,7 +152,7 @@ def test_theme_toggle_survives_populated_table(win, qapp):
 # ── table rendering ─────────────────────────────────────────────────────────
 def test_table_populates_one_row_per_result(win):
     win._results = [mk("a.exe", "MALWARE"), mk("b.exe", "SAFE"),
-                    mk("c.exe", "POTENTIAL_ZERODAY")]
+                    mk("c.exe", "ERROR")]
     win._refresh_table()
     assert win.table.rowCount() == 3
     assert win.table.item(0, 0).text() == "a.exe"
@@ -211,26 +211,50 @@ def test_row_count_label_reports_the_filter(win):
 
 
 # ── summary cards ───────────────────────────────────────────────────────────
+# Design (per explicit user request): 3 cards only.
+#   Scanned  — total files processed.
+#   Malware  — EVERY flagged file, including ones shown green for a trusted
+#              signature (the table badge already shows those green); the sub
+#              line is how many of those are NOT signed, i.e. have zero
+#              independent counter-signal.
+#   Safe     — every model-clean file; the sub line is how many of those are
+#              ALSO independently corroborated (trusted signature, or a
+#              SHA-256 checked against the malware DB and not found there).
 def test_stat_cards_update_from_a_scan(win):
-    scan = mk_scan([mk("a.exe", "MALWARE", tag=ML_ONLY_CATCH),
-                    mk("b.exe", "SAFE")],
-                   ml_only=1, malware=1, safe=1, scanned=2)
+    scan = mk_scan([mk("a.exe", "MALWARE"), mk("b.exe", "SAFE")],
+                   malware=1, safe=1, scanned=2)
     win._update_summary(scan)
     assert win.card_scanned.value.text() == "2"
     assert win.card_malware.value.text() == "1"
-    assert win.card_mlonly.value.text() == "1"
     assert win.card_safe.value.text() == "1"
 
 
-def test_signed_file_counts_as_signed_not_as_malware(win):
-    """A file shown green must not also be tallied in the red MALWARE card, or
-    the cards would contradict the badges directly beside them."""
-    scan = mk_scan([mk("Claude Setup.exe", "MALWARE", sig_status="TRUSTED",
-                       signer="Anthropic, PBC")],
-                   malware=1, scanned=1)
+def test_signed_malware_counts_in_malware_total_but_not_in_unsigned_sub(win):
+    """A signed-but-flagged file still counts in the Malware total (its row
+    is shown green, but the aggregate reflects everything the model flagged);
+    the "unsigned" sub-count must exclude it."""
+    scan = mk_scan(
+        [mk("Claude Setup.exe", "MALWARE", sig_status="TRUSTED",
+            signer="Anthropic, PBC"),
+         mk("real_malware.exe", "MALWARE")],
+        malware=2, scanned=2)
     win._update_summary(scan)
-    assert win.card_signed.value.text() == "1"
-    assert win.card_malware.value.text() == "0"
+    assert win.card_malware.value.text() == "2"
+    assert win.card_malware.sub.text() == "1 unsigned"
+
+
+def test_safe_verified_sub_counts_signature_or_hash_corroboration(win):
+    """The "verified" sub-count under Safe includes files independently
+    corroborated by EITHER a trusted signature OR a hash lookup that came
+    back NOT_IN_DB — not just "the model said so"."""
+    scan = mk_scan(
+        [mk("signed.exe", "SAFE", sig_status="TRUSTED", signer="Vendor Inc"),
+         mk("hash_checked.exe", "SAFE", hash_verdict="NOT_IN_DB"),
+         mk("uncorroborated.exe", "SAFE", hash_verdict=None)],
+        safe=3, scanned=3)
+    win._update_summary(scan)
+    assert win.card_safe.value.text() == "3"
+    assert win.card_safe.sub.text() == "2 verified"
 
 
 def test_stat_card_colour_follows_theme(win):
@@ -255,8 +279,7 @@ def _colours(img):
 
 
 @pytest.mark.parametrize("verdict,key", [("MALWARE", "danger"),
-                                         ("SAFE", "success"),
-                                         ("POTENTIAL_ZERODAY", "warn")])
+                                         ("SAFE", "success")])
 def test_badge_pill_is_actually_drawn(win, qapp, verdict, key):
     """Paint the table and look for the badge fill in the pixels — this is the
     only way to catch a delegate that silently stops rendering."""
@@ -313,8 +336,8 @@ def test_unknown_verdict_does_not_crash_the_delegate(win, qapp):
 def _reset_live_state(win):
     win._results = []
     win._pending_live = []
-    win._live_counts = dict(scanned=0, malware=0, zeroday=0, safe=0,
-                            signed=0, ml_only=0)
+    win._live_counts = dict(scanned=0, malware=0, malware_unsigned=0,
+                            safe=0, safe_verified=0)
     win.table.setRowCount(0)
 
 
@@ -324,19 +347,30 @@ def test_live_result_updates_counts_before_any_flush(win):
     _reset_live_state(win)
     win._on_result_live(mk("a.exe", "MALWARE"))
     win._on_result_live(mk("b.exe", "SAFE"))
-    win._on_result_live(mk("c.exe", "POTENTIAL_ZERODAY"))
-    assert win._live_counts == {"scanned": 3, "malware": 1, "zeroday": 1,
-                                "safe": 1, "signed": 0, "ml_only": 0}
+    win._on_result_live(mk("c.exe", "ERROR"))
+    assert win._live_counts == {"scanned": 3, "malware": 1, "malware_unsigned": 1,
+                                "safe": 1, "safe_verified": 1}
     assert len(win._pending_live) == 3
     assert win.table.rowCount() == 0            # not flushed yet
 
 
-def test_live_signed_malware_counts_as_signed_not_malware(win):
+def test_live_signed_malware_counts_in_malware_not_unsigned(win):
+    """A signed-but-flagged file still counts in the live Malware tally; only
+    the "unsigned" sub-count must exclude it."""
     _reset_live_state(win)
     win._on_result_live(mk("Claude Setup.exe", "MALWARE",
                           sig_status="TRUSTED", signer="Anthropic, PBC"))
-    assert win._live_counts["signed"] == 1
-    assert win._live_counts["malware"] == 0
+    win._on_result_live(mk("real_malware.exe", "MALWARE"))
+    assert win._live_counts["malware"] == 2
+    assert win._live_counts["malware_unsigned"] == 1
+
+
+def test_live_safe_verified_counts_signature_or_hash_corroboration(win):
+    _reset_live_state(win)
+    win._on_result_live(mk("signed.exe", "SAFE", sig_status="TRUSTED", signer="Vendor Inc"))
+    win._on_result_live(mk("uncorroborated.exe", "SAFE", hash_verdict=None))
+    assert win._live_counts["safe"] == 2
+    assert win._live_counts["safe_verified"] == 1
 
 
 def test_flush_paints_pending_rows_and_stat_cards(win):
@@ -432,14 +466,16 @@ def test_sort_by_file_name_ascending_then_descending(win):
 
 
 def test_sort_by_verdict_uses_severity_not_alphabetical(win):
+    # Severity order is MALWARE, ERROR, SAFE — alphabetical would put ERROR
+    # first, so this still distinguishes severity sort from alphabetical sort.
     win._results = [mk("a.exe", "SAFE"), mk("b.exe", "MALWARE"),
-                    mk("c.exe", "POTENTIAL_ZERODAY")]
+                    mk("c.exe", "ERROR")]
     win._sort_col = None
     win._refresh_table()
     win._on_header_clicked(1)
     verdicts = [win.table.item(r, 1).data(gui.BadgeDelegate.ROLE)
                for r in range(win.table.rowCount())]
-    assert verdicts == ["MALWARE", "POTENTIAL_ZERODAY", "SAFE"]
+    assert verdicts == ["MALWARE", "ERROR", "SAFE"]
     win._sort_col = None
 
 
@@ -653,3 +689,81 @@ def test_explain_button_disabled_while_a_call_is_in_flight(win, monkeypatch, tmp
 
     win._explain_selected()          # second click while "in flight"
     assert win._explain_worker is first_worker   # no new worker was created
+
+
+# ── model picker ────────────────────────────────────────────────────────────
+def _stub_model_switch(monkeypatch, *, passed=True, f1=0.9933, detail="F1 ok"):
+    """Replace the model-switch worker with one that reports synchronously."""
+    class FakeWorker(QtCore.QThread):
+        done = QtCore.Signal(str, float, bool)
+        failed = QtCore.Signal(str)
+
+        def __init__(self, model_path, threshold):
+            super().__init__()
+            self.model_path, self.threshold = model_path, threshold
+
+        def start(self):
+            self.done.emit(detail, f1, passed)
+
+    monkeypatch.setattr(gui, "ModelSwitchWorker", FakeWorker)
+    return FakeWorker
+
+
+def test_model_picker_lists_lgbm_models_only(win):
+    labels = [win.model_box.itemText(i) for i in range(win.model_box.count())]
+    assert labels, "model picker should offer at least the production model"
+    assert all("lgbm" in l for l in labels)
+    # The leaky model and the isolation forest must never be selectable.
+    assert not any("lgbm_v7.pkl" in l for l in labels)
+    assert not any("isolation_forest" in l for l in labels)
+
+
+def test_model_picker_marks_production(win):
+    labels = [win.model_box.itemText(i) for i in range(win.model_box.count())]
+    assert any("production" in l for l in labels)
+
+
+def test_switching_model_runs_gate_and_reenables(win, qapp, monkeypatch):
+    if win.model_box.count() < 2:
+        pytest.skip("needs >=2 models present to switch between")
+    _stub_model_switch(monkeypatch, passed=True, f1=0.9933)
+    win._selfcheck_ok = True
+    start = win.model_box.currentIndex()
+    win.model_box.setCurrentIndex(1 if start == 0 else 0)
+    qapp.processEvents()
+    assert win.model_box.isEnabled()
+    assert "0.9933" in win.model_status.text()
+    assert win.scan_btn.isEnabled()
+
+
+def test_failed_gate_blocks_scanning(win, qapp, monkeypatch):
+    if win.model_box.count() < 2:
+        pytest.skip("needs >=2 models present to switch between")
+    _stub_model_switch(monkeypatch, passed=False, f1=0.4)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical",
+                        staticmethod(lambda *a, **k: None))
+    win._selfcheck_ok = True
+    start = win.model_box.currentIndex()
+    win.model_box.setCurrentIndex(1 if start == 0 else 0)
+    qapp.processEvents()
+    assert win.scan_btn.isEnabled() is False
+    assert "✗" in win.model_status.text()
+
+
+def test_selecting_candidate_adopts_its_threshold(win, qapp, monkeypatch):
+    idx = next((i for i in range(win.model_box.count())
+                if "candidate" in win.model_box.itemText(i)), None)
+    if idx is None:
+        pytest.skip("no candidate model present")
+    _stub_model_switch(monkeypatch)
+    win.model_box.setCurrentIndex(idx)
+    qapp.processEvents()
+    # The candidate must not be evaluated at production's 0.40 by default.
+    assert abs(win.thr_spin.value() - 0.225) < 1e-6
+
+
+def test_editing_threshold_does_not_reset_it(win, qapp, monkeypatch):
+    _stub_model_switch(monkeypatch)
+    win.thr_spin.setValue(0.317)
+    qapp.processEvents()
+    assert abs(win.thr_spin.value() - 0.317) < 1e-6

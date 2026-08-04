@@ -102,8 +102,7 @@ def test_accent_readable_as_text(mode):
 @pytest.mark.parametrize("mode", MODES)
 def test_every_verdict_has_a_badge(mode):
     from avscan import signature
-    for verdict in ("MALWARE", "POTENTIAL_ZERODAY", "SAFE", "ERROR",
-                    signature.SIGNED_SAFE):
+    for verdict in ("MALWARE", "SAFE", "ERROR", signature.SIGNED_SAFE):
         b = theme.badge(verdict, mode)
         assert b["label"], f"{verdict} has an empty label"
         assert HEX.match(b["fg"]) and HEX.match(b["bg"])

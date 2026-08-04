@@ -32,16 +32,16 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from avscan import config, explain, signature, theme  # noqa: E402
-from avscan.engine import get_engine, MALWARE, POTENTIAL_ZERODAY, SAFE, ERROR  # noqa: E402
+from avscan.engine import get_engine, MALWARE, SAFE, ERROR  # noqa: E402
 from avscan.hashdb import HashDB, KNOWN_MALWARE  # noqa: E402
 from avscan.selfcheck import run_selfcheck  # noqa: E402
 
 
-def quick_scan(path: str, *, use_if: bool = True, do_explain: bool = True) -> dict:
+def quick_scan(path: str, *, do_explain: bool = True) -> dict:
     """Scan a single file. Returns a result dict; never raises."""
     res = {
         "path": path, "name": os.path.basename(path), "sha256": None, "size": 0,
-        "ml_verdict": None, "lgbm_prob": None, "if_score": None,
+        "ml_verdict": None, "lgbm_prob": None,
         "hash_verdict": None, "explanation": None, "explain_status": None,
         "error": None, "selfcheck_ok": True, "selfcheck_failed": [],
         "signature_status": None, "signature_signer": None, "signature_detail": None,
@@ -67,12 +67,12 @@ def quick_scan(path: str, *, use_if: bool = True, do_explain: bool = True) -> di
         return res
 
     try:
-        engine = get_engine(load_if=True)
+        engine = get_engine()
         with open(path, "rb") as f:
             data = f.read()
-        ml, sha, size = engine.classify_file(path, use_if=use_if)
+        ml, sha, size = engine.classify_file(path)
         res.update(sha256=sha, size=size, ml_verdict=ml.ml_verdict,
-                   lgbm_prob=ml.lgbm_prob, if_score=ml.if_score, error=ml.error)
+                   lgbm_prob=ml.lgbm_prob, error=ml.error)
 
         # Independent SHA-256 signature lookup (never changes the ML verdict).
         try:
@@ -85,14 +85,14 @@ def quick_scan(path: str, *, use_if: bool = True, do_explain: bool = True) -> di
         # Authenticode layer (independent) — never changes the ML verdict, but a
         # valid signature is the strongest offline counter-signal to a false
         # positive, so it is checked for anything flagged.
-        if ml.ml_verdict in (MALWARE, POTENTIAL_ZERODAY):
+        if ml.ml_verdict == MALWARE:
             sig = signature.verify(path)
             res["signature_status"] = sig.status
             res["signature_signer"] = sig.signer
             res["signature_detail"] = sig.detail
 
         # Explanation only for flagged files (saves API cost on clean files).
-        if do_explain and ml.ml_verdict in (MALWARE, POTENTIAL_ZERODAY):
+        if do_explain and ml.ml_verdict == MALWARE:
             out = explain.explain_bytes(engine, data, ml,
                                         hash_verdict=res.get("hash_verdict"),
                                         signature_status=res.get("signature_status"),
@@ -146,7 +146,6 @@ P = theme.palette("dark")
 
 _STYLE = {
     MALWARE:           ("danger",  "⛔", "זדוני / נוזקה"),
-    POTENTIAL_ZERODAY: ("warn",    "⚠",  "חשוד (זירו-דיי אפשרי)"),
     SAFE:              ("success", "✓",  "נקי"),
     ERROR:             ("neutral", "•",  "שגיאה בסריקה"),
     # Green: flagged by the model, but validly signed by a trusted publisher.
@@ -361,7 +360,7 @@ def _render_results(root, res: dict):
     # No quarantine button when the file is shown green — offering to isolate a
     # file we just declared clean is contradictory. Use the CLI's
     # --no-trust-signed to quarantine a signed file anyway.
-    if (res["selfcheck_ok"] and res["ml_verdict"] in (MALWARE, POTENTIAL_ZERODAY)
+    if (res["selfcheck_ok"] and res["ml_verdict"] == MALWARE
             and shown != signature.SIGNED_SAFE
             and res.get("path") and res.get("sha256") and os.path.isfile(res["path"])):
         qbtn = tk.Button(btnbar, text="🛡  העבר להסגר", bg=P["danger"], fg="#ffffff",
@@ -536,7 +535,7 @@ def show_popup(res: dict, _for_test: bool = False):
     root.mainloop()
 
 
-def run_popup(path: str, *, use_if: bool = True, do_explain: bool = True) -> int:
+def run_popup(path: str, *, do_explain: bool = True) -> int:
     """Show a 'scanning…' window IMMEDIATELY, run the scan on a background thread,
     then swap in the results in the same window. Returns the exit code."""
     import queue
@@ -565,10 +564,10 @@ def run_popup(path: str, *, use_if: bool = True, do_explain: bool = True) -> int
 
     def worker():
         try:
-            r = quick_scan(path, use_if=use_if, do_explain=do_explain)
+            r = quick_scan(path, do_explain=do_explain)
         except Exception as e:  # never let the worker die silently under pythonw
             r = {"path": path, "name": os.path.basename(path), "sha256": None, "size": 0,
-                 "ml_verdict": ERROR, "lgbm_prob": None, "if_score": None,
+                 "ml_verdict": ERROR, "lgbm_prob": None,
                  "hash_verdict": None, "explanation": None, "explain_status": None,
                  "error": f"{type(e).__name__}: {e}", "selfcheck_ok": True,
                  "selfcheck_failed": []}
@@ -589,7 +588,7 @@ def run_popup(path: str, *, use_if: bool = True, do_explain: bool = True) -> int
     root.mainloop()
 
     res = holder["res"] or {}
-    return 1 if res.get("ml_verdict") in (MALWARE, POTENTIAL_ZERODAY) else 0
+    return 1 if res.get("ml_verdict") == MALWARE else 0
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -600,27 +599,26 @@ def main(argv=None) -> int:
     ap.add_argument("file", help="path to the file to scan")
     ap.add_argument("--text", action="store_true", help="print result instead of a popup")
     ap.add_argument("--no-explain", action="store_true", help="skip the Gemini explanation")
-    ap.add_argument("--no-if", action="store_true", help="disable the Isolation Forest layer")
     args = ap.parse_args(argv)
 
     if args.text:
-        res = quick_scan(args.file, use_if=not args.no_if, do_explain=not args.no_explain)
+        res = quick_scan(args.file, do_explain=not args.no_explain)
         _print_text(res)
-        return 1 if res["ml_verdict"] in (MALWARE, POTENTIAL_ZERODAY) else 0
+        return 1 if res["ml_verdict"] == MALWARE else 0
 
     # GUI: show a "scanning…" window immediately, scan on a worker thread, then
     # render the results in the same window.
     try:
-        return run_popup(args.file, use_if=not args.no_if, do_explain=not args.no_explain)
+        return run_popup(args.file, do_explain=not args.no_explain)
     except Exception as e:
         # Last-resort fallback if Tk can't start at all.
-        res = quick_scan(args.file, use_if=not args.no_if, do_explain=not args.no_explain)
+        res = quick_scan(args.file, do_explain=not args.no_explain)
         try:
             import tkinter.messagebox as mb
             mb.showinfo("AntivirusAI", f"{res['name']}: {res['ml_verdict']}")
         except Exception:
             print(f"{res['name']}: {res['ml_verdict']} ({e})")
-        return 1 if res["ml_verdict"] in (MALWARE, POTENTIAL_ZERODAY) else 0
+        return 1 if res["ml_verdict"] == MALWARE else 0
 
 
 if __name__ == "__main__":

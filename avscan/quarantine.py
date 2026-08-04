@@ -2,8 +2,7 @@
 quarantine.py — Move, neutralize, and restore detected malware (spec §6).
 
 Policy:
-  * Only MALWARE is auto-quarantined. POTENTIAL_ZERODAY is reported, never moved
-    automatically (it needs human review).
+  * Only MALWARE is auto-quarantined.
   * Neutralize the stored copy so it cannot execute from quarantine:
       - store it with a `.quarantine` suffix, AND
       - optionally XOR every byte with a fixed key (default 0x55) so the stored
@@ -42,14 +41,34 @@ def xor_bytes(data: bytes, key: int) -> bytes:
     return data.translate(_xor_table(key))
 
 
+# Local, always-on-C:, per-user fallback used when the project's own
+# quarantine dir can't be created/written — e.g. the project directory is a
+# network share (\\host\...) reached with no write permission there. Never
+# depends on the project's own location, since that's exactly what's failing.
+LOCAL_FALLBACK_QUARANTINE_DIR = config.LOCAL_FALLBACK_ROOT / "quarantine"
+
+
+def _resolve_writable_dir(preferred: Path) -> tuple[Path, bool]:
+    """Try `preferred`; on any OSError (permission denied, unreachable share,
+    read-only network mount, ...) fall back to a local per-user directory that
+    is always writable. Returns (dir, used_fallback)."""
+    return config.resolve_writable_dir(preferred, LOCAL_FALLBACK_QUARANTINE_DIR)
+
+
 class Quarantine:
     def __init__(self, quarantine_dir=None, manifest_path=None,
                  use_xor: bool = True, xor_key: int = config.XOR_KEY_DEFAULT):
-        self.dir = Path(quarantine_dir) if quarantine_dir else config.QUARANTINE_DIR
-        self.manifest_path = Path(manifest_path) if manifest_path else config.QUARANTINE_MANIFEST
+        self.used_local_fallback = False
+        if quarantine_dir:
+            # Caller picked this directory explicitly (e.g. tests) — honor it
+            # as-is, no silent redirect.
+            self.dir = Path(quarantine_dir)
+            self.dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.dir, self.used_local_fallback = _resolve_writable_dir(config.QUARANTINE_DIR)
+        self.manifest_path = Path(manifest_path) if manifest_path else self.dir / "manifest.json"
         self.use_xor = use_xor
         self.xor_key = xor_key
-        self.dir.mkdir(parents=True, exist_ok=True)
         self._entries: list[dict] = self._load_manifest()
 
     # ── manifest ─────────────────────────────────────────────────────────────

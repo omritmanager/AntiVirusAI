@@ -271,7 +271,7 @@ def display_verdict(ml_verdict: str, signature_status: str | None,
         return ml_verdict
     if hash_verdict == "KNOWN_MALWARE":
         return ml_verdict
-    if signature_status == TRUSTED and ml_verdict in ("MALWARE", "POTENTIAL_ZERODAY"):
+    if signature_status == TRUSTED and ml_verdict == "MALWARE":
         return SIGNED_SAFE
     return ml_verdict
 

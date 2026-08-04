@@ -150,6 +150,16 @@ def main() -> int:
                     help="Stage 1 extraction JSONL")
     ap.add_argument("--out-dir", type=Path, default=ROOT / "data" / "augmentation")
     ap.add_argument("--reports-dir", type=Path, default=ROOT / "reports")
+    ap.add_argument("--trust-all-valid-signatures", action="store_true",
+                    help="Accept ANY file whose Authenticode signature verifies as "
+                         "TRUSTED against Windows' trust store, instead of requiring "
+                         "the signer to be on TRUSTED_PUBLISHER_ALLOWLIST. The full "
+                         "run surfaced 346 distinct legitimate signers, far past what "
+                         "a hand-curated list can cover; a valid chain to a Windows "
+                         "root already means a CA identity-verified a legal entity, "
+                         "and the known-malware hash drop still runs first either way. "
+                         "Signer names are still recorded per accepted record so the "
+                         "decision stays auditable.")
     args = ap.parse_args()
 
     if not args.input.exists():
@@ -203,9 +213,12 @@ def main() -> int:
                 rec["accept_reason"] = "model_safe"
                 acc_f.write(json.dumps(rec) + "\n")
             elif verdict in ("MALWARE", "POTENTIAL_ZERODAY"):
-                if sig_status == "TRUSTED" and signer in TRUSTED_PUBLISHER_ALLOWLIST:
+                allowlisted = signer in TRUSTED_PUBLISHER_ALLOWLIST
+                if sig_status == "TRUSTED" and (allowlisted
+                                                or args.trust_all_valid_signatures):
                     n_trusted_override += 1
-                    rec["accept_reason"] = "trusted_signer_override"
+                    rec["accept_reason"] = ("trusted_signer_override" if allowlisted
+                                            else "valid_signature_any_signer")
                     acc_f.write(json.dumps(rec) + "\n")
                 else:
                     n_review += 1

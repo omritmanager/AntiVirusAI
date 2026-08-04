@@ -37,8 +37,8 @@ except Exception as e:  # pragma: no cover - exercised only without PySide6
 
 
 if HAVE_QT:
-    from .engine import MALWARE, POTENTIAL_ZERODAY, SAFE, ERROR, get_engine
-    from .hashdb import HashDB, KNOWN_MALWARE
+    from .engine import MALWARE, SAFE, ERROR, get_engine
+    from .hashdb import HashDB, KNOWN_MALWARE, NOT_IN_DB
     from .orchestrator import scan_folder, ML_ONLY_CATCH
     from .quarantine import Quarantine
     from .selfcheck import run_selfcheck, status_line
@@ -57,25 +57,23 @@ if HAVE_QT:
         finished_scan = QtCore.Signal(object)
         failed = QtCore.Signal(str)
 
-        def __init__(self, folder, *, use_if, whitelist_enabled,
+        def __init__(self, folder, *, whitelist_enabled,
                      hash_compare, auto_quarantine):
             super().__init__()
             self.folder = folder
-            self.use_if = use_if
             self.whitelist_enabled = whitelist_enabled
             self.hash_compare = hash_compare
             self.auto_quarantine = auto_quarantine
 
         def run(self):
             try:
-                engine = get_engine(load_if=True)
+                engine = get_engine()
                 hash_db = HashDB(config.BASELINE_SQLITE) if self.hash_compare else None
                 q = Quarantine() if self.auto_quarantine else None
                 on_malware = q.quarantine_for_result if q else None
                 scan = scan_folder(
                     self.folder,
                     engine=engine,
-                    use_if=self.use_if,
                     whitelist_enabled=self.whitelist_enabled,
                     hash_db=hash_db,
                     hash_compare=self.hash_compare,
@@ -114,10 +112,10 @@ if HAVE_QT:
                 self.failed.emit(f"Could not read the file: {e}")
                 return
             try:
-                engine = get_engine(load_if=True)
+                engine = get_engine()
                 ml_result = SimpleNamespace(
                     ml_verdict=self.fr.ml_verdict, lgbm_prob=self.fr.lgbm_prob,
-                    if_score=self.fr.if_score, error=self.fr.error)
+                    error=self.fr.error)
                 result = explain.explain_bytes(
                     engine, data, ml_result,
                     hash_verdict=self.fr.hash_verdict,
@@ -127,6 +125,40 @@ if HAVE_QT:
                 )
                 self.done.emit(result)
             except Exception as e:  # never let the worker die silently
+                self.failed.emit(f"{type(e).__name__}: {e}")
+
+    class ModelSwitchWorker(QtCore.QThread):
+        """Loads a newly selected model and re-runs the regression gate on it.
+
+        The gate is the whole point of doing this off the main thread: it scores
+        the full held-out test set, which takes seconds, and it is what stops a
+        broken candidate from being scanned with. Verifying at SELECTION time
+        means the user learns the model is bad immediately, instead of halfway
+        through a real scan.
+        """
+        done = QtCore.Signal(str, float, bool)   # detail, f1, passed
+        failed = QtCore.Signal(str)
+
+        def __init__(self, model_path, threshold):
+            super().__init__()
+            self.model_path = model_path
+            self.threshold = threshold
+
+        def run(self):
+            try:
+                from . import selfcheck
+                from .engine import reset_engine
+
+                config.LGBM_PATH = self.model_path
+                config.LGBM_THRESHOLD = self.threshold
+                reset_engine()          # force the next scan to load this model
+
+                check, f1 = selfcheck.check_regression()
+                # Surface the load error itself rather than a bare gate failure.
+                get_engine()
+                self.done.emit(check.detail, f1 if f1 is not None else float("nan"),
+                               bool(check.passed))
+            except Exception as e:
                 self.failed.emit(f"{type(e).__name__}: {e}")
 
     class ExplainDialog(QtWidgets.QDialog):
@@ -209,7 +241,8 @@ if HAVE_QT:
             return QtCore.QSize(s.width(), max(s.height(), 34))
 
     class StatCard(QtWidgets.QFrame):
-        """A single headline number with a caption underneath."""
+        """A single headline number, a caption, and an optional small breakdown
+        line underneath (e.g. "312 unsigned") — set via `sub` in set_value()."""
 
         def __init__(self, label: str, accent_key: str = "text", parent=None):
             super().__init__(parent)
@@ -222,13 +255,18 @@ if HAVE_QT:
             self.value.setObjectName("StatValue")
             self.caption = QtWidgets.QLabel(label.upper())
             self.caption.setObjectName("StatLabel")
+            self.sub = QtWidgets.QLabel("")
+            self.sub.setObjectName("StatSub")
             lay.addWidget(self.value)
             lay.addWidget(self.caption)
+            lay.addWidget(self.sub)
 
-        def set_value(self, n, mode: str):
+        def set_value(self, n, mode: str, sub: str | None = None):
             self.value.setText(str(n))
             colour = theme.palette(mode)[self.accent_key]
             self.value.setStyleSheet(f"color: {colour};")
+            if sub is not None:
+                self.sub.setText(sub)
 
     class MainWindow(QtWidgets.QMainWindow):
         COLUMNS = ["File", "Verdict", "Confidence",
@@ -245,11 +283,12 @@ if HAVE_QT:
             self._selfcheck_ok = False
             self._worker = None
             self._explain_worker = None
+            self._model_worker = None
             self._sort_col = None
             self._sort_reverse = False
             self._pending_live = []          # FileResults not yet flushed to the table
-            self._live_counts = dict(scanned=0, malware=0, zeroday=0, safe=0,
-                                     signed=0, ml_only=0)
+            self._live_counts = dict(scanned=0, malware=0, malware_unsigned=0,
+                                     safe=0, safe_verified=0)
             self._live_flush = QtCore.QTimer(self)
             self._live_flush.setInterval(150)
             self._live_flush.timeout.connect(self._flush_live_results)
@@ -344,39 +383,161 @@ if HAVE_QT:
 
             tog = QtWidgets.QHBoxLayout()
             tog.setSpacing(18)
-            self.cb_if = QtWidgets.QCheckBox("Zero-day anomaly layer")
-            self.cb_if.setToolTip("Experimental Isolation Forest layer")
-            self.cb_if.setChecked(True)
             self.cb_white = QtWidgets.QCheckBox("Skip system files")
             self.cb_white.setChecked(True)
             self.cb_quar = QtWidgets.QCheckBox("Auto-quarantine malware")
             self.cb_hash = QtWidgets.QCheckBox("Compare against signature DB")
             self.cb_hash.setChecked(True)
-            for cb in (self.cb_if, self.cb_white, self.cb_quar, self.cb_hash):
+            for cb in (self.cb_white, self.cb_quar, self.cb_hash):
                 cb.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
                 tog.addWidget(cb)
             tog.addStretch(1)
             lay.addLayout(tog)
+
+            lay.addLayout(self._build_model_row())
             return card
+
+        # ── model picker ─────────────────────────────────────────────────────
+        @staticmethod
+        def _discover_models():
+            """(label, path, default_threshold) for every selectable LightGBM model.
+
+            Only lgbm_*.pkl files are offered: lgbm_v7.pkl is the leaky model
+            the engine refuses to load (spec §3), so it doesn't belong in a picker.
+            """
+            out = []
+            for p in sorted(config.MODELS_DIR.glob("lgbm_*.pkl")):
+                if p.name == "lgbm_v7.pkl":
+                    continue
+                if p.name == "lgbm_v7_correct.pkl":
+                    label, thr = f"{p.name}  (production)", config.DEFAULT_LGBM_THRESHOLD
+                elif "candidate" in p.name and "broken" not in p.name:
+                    # 0.225 is the recall-matched operating point for the
+                    # augmented candidate; at the production 0.40 it looks worse
+                    # than it is purely because of where the threshold sits.
+                    label, thr = f"{p.name}  (candidate)", 0.225
+                else:
+                    label, thr = p.name, config.DEFAULT_LGBM_THRESHOLD
+                out.append((label, p, thr))
+            return out
+
+        def _build_model_row(self):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(9)
+            lbl = QtWidgets.QLabel("MODEL")
+            lbl.setObjectName("SectionLabel")
+            row.addWidget(lbl)
+
+            self._models = self._discover_models()
+            self.model_box = QtWidgets.QComboBox()
+            self.model_box.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            self.model_box.setToolTip(
+                "Which trained model to scan with. Switching re-runs the "
+                "regression gate on the held-out test set before the model is "
+                "used, so a broken model is refused rather than silently trusted.")
+            for label, _p, _t in self._models:
+                self.model_box.addItem(label)
+            # Preselect whatever config actually resolved to (honours AVSCAN_MODEL).
+            for i, (_l, p, _t) in enumerate(self._models):
+                if p == config.LGBM_PATH:
+                    self.model_box.setCurrentIndex(i)
+                    break
+            row.addWidget(self.model_box, 1)
+
+            thr_lbl = QtWidgets.QLabel("Threshold")
+            thr_lbl.setObjectName("CurrentFile")
+            row.addWidget(thr_lbl)
+            self.thr_spin = QtWidgets.QDoubleSpinBox()
+            self.thr_spin.setDecimals(3)
+            self.thr_spin.setSingleStep(0.005)
+            self.thr_spin.setRange(0.001, 0.999)
+            self.thr_spin.setValue(float(config.LGBM_THRESHOLD))
+            self.thr_spin.setToolTip(
+                "Probability above which a file counts as malware. Comparing two "
+                "models at different thresholds is not apples-to-apples — match "
+                "the recall first.")
+            row.addWidget(self.thr_spin)
+
+            self.model_status = QtWidgets.QLabel("")
+            self.model_status.setObjectName("CurrentFile")
+            row.addWidget(self.model_status, 1)
+
+            # Connected last so the initial setCurrentIndex/setValue above do not
+            # trigger a spurious model switch during construction.
+            self.model_box.currentIndexChanged.connect(self._on_model_changed)
+            self.thr_spin.valueChanged.connect(self._on_model_changed)
+            return row
+
+        def _on_model_changed(self, *_):
+            if self._model_worker is not None and self._model_worker.isRunning():
+                return
+            idx = self.model_box.currentIndex()
+            if not (0 <= idx < len(self._models)):
+                return
+            label, path, default_thr = self._models[idx]
+
+            # Selecting a different model adopts that model's own operating
+            # point; editing the spinbox directly keeps whatever was typed.
+            if self.sender() is self.model_box:
+                self.thr_spin.blockSignals(True)
+                self.thr_spin.setValue(default_thr)
+                self.thr_spin.blockSignals(False)
+
+            self.model_box.setEnabled(False)
+            self.thr_spin.setEnabled(False)
+            self.scan_btn.setEnabled(False)
+            self.model_status.setText("verifying…")
+            self.status.showMessage(f"Loading {path.name} and re-running the regression gate…")
+
+            self._model_worker = ModelSwitchWorker(path, float(self.thr_spin.value()))
+            self._model_worker.done.connect(self._on_model_ready)
+            self._model_worker.failed.connect(self._on_model_failed)
+            self._model_worker.start()
+
+        def _on_model_ready(self, detail, f1, passed):
+            self.model_box.setEnabled(True)
+            self.thr_spin.setEnabled(True)
+            # Matches the app's own rule: the startup self-check owns whether
+            # scanning is allowed at all (the path is validated in _start_scan).
+            self.scan_btn.setEnabled(self._selfcheck_ok)
+            mark = "✓" if passed else "✗"
+            self.model_status.setText(f"{mark} F1={f1:.4f}")
+            self.model_status.setToolTip(detail)
+            self.status.showMessage(f"{config.LGBM_PATH.name}: {detail}", 12000)
+            if not passed:
+                # Mirrors the startup self-check contract: a model that fails the
+                # regression gate must not be quietly scanned with.
+                self.scan_btn.setEnabled(False)
+                QtWidgets.QMessageBox.critical(
+                    self, "Model failed the regression gate",
+                    f"{config.LGBM_PATH.name} did not pass:\n\n{detail}\n\n"
+                    "Scanning is blocked with this model. Pick another one.")
+
+        def _on_model_failed(self, msg):
+            self.model_box.setEnabled(True)
+            self.thr_spin.setEnabled(True)
+            self.scan_btn.setEnabled(False)   # unknown model state — fail closed
+            self.model_status.setText("✗ load failed")
+            self.model_status.setToolTip(msg)
+            QtWidgets.QMessageBox.critical(self, "Could not load model", msg)
 
         def _build_stats_row(self):
             row = QtWidgets.QHBoxLayout()
             row.setSpacing(11)
-            # ML-only catches first: it is the headline result of the project.
-            self.card_mlonly = StatCard("ML-only catches", "accent")
             self.card_scanned = StatCard("Scanned", "text")
             self.card_malware = StatCard("Malware", "danger")
-            self.card_zeroday = StatCard("Zero-day?", "warn")
-            self.card_signed = StatCard("Signed / trusted", "success")
             self.card_safe = StatCard("Safe", "success")
-            self._cards = [self.card_mlonly, self.card_scanned, self.card_malware,
-                           self.card_zeroday, self.card_signed, self.card_safe]
-            self.card_mlonly.setToolTip(
-                "Malware the ML model caught that a SHA-256 signature database "
-                "would have missed — the headline result.")
-            self.card_signed.setToolTip(
-                "Flagged by the model but carrying a valid Authenticode "
-                "signature, so shown as clean.")
+            self._cards = [self.card_scanned, self.card_malware, self.card_safe]
+            self.card_malware.setToolTip(
+                "Every file the model flagged, including ones shown green in "
+                "the table because they carry a trusted signature. The small "
+                "number below is how many of these are NOT signed — those are "
+                "the ones with no independent counter-signal at all.")
+            self.card_safe.setToolTip(
+                "Every file the model judged clean. The small number below is "
+                "how many of these are also independently corroborated: either "
+                "a trusted Authenticode signature, or a SHA-256 that was "
+                "checked against the known-malware database and NOT found there.")
             for c in self._cards:
                 row.addWidget(c, 1)
             return row
@@ -531,8 +692,8 @@ if HAVE_QT:
             self.table.setRowCount(0)
             self._results = []
             self._pending_live = []
-            self._live_counts = dict(scanned=0, malware=0, zeroday=0, safe=0,
-                                     signed=0, ml_only=0)
+            self._live_counts = dict(scanned=0, malware=0, malware_unsigned=0,
+                                     safe=0, safe_verified=0)
             for card in self._cards:
                 card.set_value(0, self._mode)
             self.progress.setValue(0)
@@ -540,7 +701,6 @@ if HAVE_QT:
             self.cur_file.setText("Starting…")
             self._worker = ScanWorker(
                 folder,
-                use_if=self.cb_if.isChecked(),
                 whitelist_enabled=self.cb_white.isChecked(),
                 hash_compare=self.cb_hash.isChecked(),
                 auto_quarantine=self.cb_quar.isChecked(),
@@ -595,19 +755,16 @@ if HAVE_QT:
             """
             self._results.append(fr)
             self._pending_live.append(fr)
-            shown = self._shown_verdict(fr)
             c = self._live_counts
             c["scanned"] += 1
-            if shown == signature.SIGNED_SAFE:
-                c["signed"] += 1
-            elif fr.ml_verdict == MALWARE:
+            if fr.ml_verdict == MALWARE:
                 c["malware"] += 1
-            elif fr.ml_verdict == POTENTIAL_ZERODAY:
-                c["zeroday"] += 1
+                if fr.signature_status != signature.TRUSTED:
+                    c["malware_unsigned"] += 1
             elif fr.ml_verdict == SAFE:
                 c["safe"] += 1
-            if fr.comparison_tag == ML_ONLY_CATCH:
-                c["ml_only"] += 1
+                if fr.signature_status == signature.TRUSTED or fr.hash_verdict == NOT_IN_DB:
+                    c["safe_verified"] += 1
 
         def _flush_live_results(self):
             if not self._pending_live:
@@ -624,12 +781,11 @@ if HAVE_QT:
                         self._append_row(fr)
                 self._update_result_count()
             c = self._live_counts
-            self.card_mlonly.set_value(c["ml_only"], self._mode)
             self.card_scanned.set_value(c["scanned"], self._mode)
-            self.card_malware.set_value(c["malware"], self._mode)
-            self.card_zeroday.set_value(c["zeroday"], self._mode)
-            self.card_signed.set_value(c["signed"], self._mode)
-            self.card_safe.set_value(c["safe"], self._mode)
+            self.card_malware.set_value(c["malware"], self._mode,
+                                        sub=f"{c['malware_unsigned']} unsigned")
+            self.card_safe.set_value(c["safe"], self._mode,
+                                     sub=f"{c['safe_verified']} verified")
 
         # ── summary + table ──────────────────────────────────────────────────
         @staticmethod
@@ -639,21 +795,18 @@ if HAVE_QT:
 
         def _update_summary(self, scan):
             s = scan.summary
-            ml_only = 0
-            if scan.hash_comparison:
-                ml_only = scan.hash_comparison.get("files", {}).get(ML_ONLY_CATCH, 0)
-            signed = sum(1 for r in scan.results
-                         if self._shown_verdict(r) == signature.SIGNED_SAFE)
-            # Files shown green because they are signed are not counted as
-            # malware in the cards, but scan.summary still records them as such;
-            # subtract so the visible tallies match the visible badges.
-            for card, n in ((self.card_mlonly, ml_only),
-                            (self.card_scanned, s.scanned),
-                            (self.card_malware, max(s.malware - signed, 0)),
-                            (self.card_zeroday, s.potential_zeroday),
-                            (self.card_signed, signed),
-                            (self.card_safe, s.safe)):
-                card.set_value(n, self._mode)
+            malware_unsigned = sum(1 for r in scan.results
+                                   if r.ml_verdict == MALWARE
+                                   and r.signature_status != signature.TRUSTED)
+            safe_verified = sum(1 for r in scan.results
+                                if r.ml_verdict == SAFE
+                                and (r.signature_status == signature.TRUSTED
+                                     or r.hash_verdict == NOT_IN_DB))
+            self.card_scanned.set_value(s.scanned, self._mode)
+            self.card_malware.set_value(s.malware, self._mode,
+                                        sub=f"{malware_unsigned} unsigned")
+            self.card_safe.set_value(s.safe, self._mode,
+                                     sub=f"{safe_verified} verified")
 
         def _row_passes_filter(self, fr):
             mode = self.filter_box.currentIndex()
@@ -664,9 +817,9 @@ if HAVE_QT:
             return True
 
         # Rank used when sorting the Verdict column — severity order, not
-        # alphabetical, so MALWARE and POTENTIAL_ZERODAY cluster at one end.
-        _VERDICT_RANK = {MALWARE: 0, POTENTIAL_ZERODAY: 1, ERROR: 2,
-                         signature.SIGNED_SAFE: 3, SAFE: 4}
+        # alphabetical, so MALWARE sorts to one end.
+        _VERDICT_RANK = {MALWARE: 0, ERROR: 1,
+                         signature.SIGNED_SAFE: 2, SAFE: 3}
 
         def _sort_key(self, col):
             if col == 0:
@@ -797,8 +950,12 @@ if HAVE_QT:
                 QtWidgets.QMessageBox.information(self, "No report", "Run a scan first.")
 
         def _open_quarantine(self):
-            config.QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
-            self._open_path(str(config.QUARANTINE_DIR))
+            # Resolve via Quarantine() itself (not config.QUARANTINE_DIR directly) so
+            # this opens wherever files actually landed, including the local-drive
+            # fallback used when the project folder isn't writable (e.g. a read-only
+            # network share) — see quarantine.py's _resolve_writable_dir().
+            q = Quarantine()
+            self._open_path(str(q.dir))
 
         def _explain_selected(self):
             rows = {i.row() for i in self.table.selectedIndexes()}
@@ -900,7 +1057,7 @@ if HAVE_QT:
             """
             self._live_flush.stop()
             for worker in (getattr(self, "_sc_worker", None), self._worker,
-                          self._explain_worker):
+                          self._explain_worker, self._model_worker):
                 if worker is not None and worker.isRunning():
                     worker.requestInterruption()
                     worker.wait(5000)

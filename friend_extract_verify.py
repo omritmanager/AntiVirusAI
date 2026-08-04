@@ -32,8 +32,8 @@ WHAT TO DO
 
    (lightgbm is optional — only needed if you also want this script to tell
    you the model's current verdict on each file, not just extract features.
-   If you were given lgbm_v7_correct.pkl / isolation_forest.pkl / thresholds.json
-   / if_config.json, put them in the SAME folder as this script.)
+   If you were given lgbm_v7_correct.pkl / thresholds.json, put them in the
+   SAME folder as this script.)
 
 3. Run the real extraction:
 
@@ -76,13 +76,11 @@ OPTIONAL_VERIFY = {
 
 EXPECTED_DIM = 2381
 TEMPORAL_INDICES = [1557, 1558, 1599, 1602, 1609, 1610, 1612, 1613, 1616, 1617]
-# Fallback thresholds if thresholds.json / if_config.json aren't shipped alongside
-# this script (matching models/v7/thresholds.json "recommended" and
-# models/v7/if_config.json "anomaly_threshold" at time of writing).
+# Fallback threshold if thresholds.json isn't shipped alongside this script
+# (matching models/v7/thresholds.json "recommended" at time of writing).
 DEFAULT_LGBM_THRESHOLD = 0.40000000000000013
-DEFAULT_IF_THRESHOLD = 0.3694358641837102
 
-MALWARE, POTENTIAL_ZERODAY, SAFE, ERROR = "MALWARE", "POTENTIAL_ZERODAY", "SAFE", "ERROR"
+MALWARE, SAFE, ERROR = "MALWARE", "SAFE", "ERROR"
 
 
 def ok(msg): print(f"  [OK]   {msg}")
@@ -345,8 +343,7 @@ def _signer_name(path: str):
 
 # ── Step 6: optional classification (mirrors avscan/engine.py's math exactly) ─
 def load_models(models_dir: Path):
-    """Returns (lgbm, iso_or_None, lgbm_threshold, if_threshold) or None if the
-    primary model isn't present."""
+    """Returns (lgbm, lgbm_threshold) or None if the primary model isn't present."""
     import pickle
     lgbm_path = models_dir / "lgbm_v7_correct.pkl"
     if not lgbm_path.exists():
@@ -356,15 +353,6 @@ def load_models(models_dir: Path):
     with open(lgbm_path, "rb") as f:
         lgbm = pickle.load(f)
 
-    iso = None
-    iso_path = models_dir / "isolation_forest.pkl"
-    if iso_path.exists():
-        try:
-            with open(iso_path, "rb") as f:
-                iso = pickle.load(f)
-        except Exception:
-            iso = None
-
     lgbm_threshold = DEFAULT_LGBM_THRESHOLD
     th_path = models_dir / "thresholds.json"
     if th_path.exists():
@@ -373,28 +361,13 @@ def load_models(models_dir: Path):
         except Exception:
             pass
 
-    if_threshold = DEFAULT_IF_THRESHOLD
-    if_path = models_dir / "if_config.json"
-    if if_path.exists():
-        try:
-            if_threshold = json.loads(if_path.read_text())["anomaly_threshold"]
-        except Exception:
-            pass
-
-    return lgbm, iso, lgbm_threshold, if_threshold
+    return lgbm, lgbm_threshold
 
 
-def classify(lgbm, iso, vec, lgbm_threshold, if_threshold):
+def classify(lgbm, vec, lgbm_threshold):
     row = vec.reshape(1, -1)
     lgbm_prob = float(lgbm.predict_proba(row)[0, 1])
-    if lgbm_prob >= lgbm_threshold:
-        return MALWARE, lgbm_prob, None
-    if iso is not None:
-        if_score = float(-iso.score_samples(row)[0])
-        if if_score >= if_threshold:
-            return POTENTIAL_ZERODAY, lgbm_prob, if_score
-        return SAFE, lgbm_prob, if_score
-    return SAFE, lgbm_prob, None
+    return (MALWARE if lgbm_prob >= lgbm_threshold else SAFE), lgbm_prob
 
 
 # ── Main extraction loop (checkpointed, size-ascending, same design as the
@@ -535,9 +508,9 @@ def main() -> int:
                 "imphash": imphash,
             }
             if models:
-                lgbm, iso, lgbm_t, if_t = models
-                verdict, prob, if_score = classify(lgbm, iso, vec, lgbm_t, if_t)
-                rec.update(ml_verdict=verdict, lgbm_prob=prob, if_score=if_score)
+                lgbm, lgbm_t = models
+                verdict, prob = classify(lgbm, vec, lgbm_t)
+                rec.update(ml_verdict=verdict, lgbm_prob=prob)
 
             out_f.write(json.dumps(rec) + "\n")
             out_f.flush()

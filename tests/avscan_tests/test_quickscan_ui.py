@@ -52,7 +52,7 @@ def root(tk_root):
 def make_res(**over):
     res = dict(
         name="sample.exe", path=r"C:\samples\sample.exe", sha256="ab" * 32,
-        size=1024, ml_verdict="MALWARE", lgbm_prob=0.9987, if_score=None,
+        size=1024, ml_verdict="MALWARE", lgbm_prob=0.9987,
         hash_verdict="NOT_IN_DB", error=None, selfcheck_ok=True,
         selfcheck_failed=[], explanation=None, explain_status=None,
         signature_status=None, signature_signer=None, signature_detail=None)
@@ -103,7 +103,6 @@ def has_button(w, needle):
 # ── verdict banner ──────────────────────────────────────────────────────────
 @pytest.mark.parametrize("verdict,key", [
     ("MALWARE", "danger"),
-    ("POTENTIAL_ZERODAY", "warn"),
     ("SAFE", "success"),
 ])
 def test_banner_colour_matches_verdict(root, verdict, key):

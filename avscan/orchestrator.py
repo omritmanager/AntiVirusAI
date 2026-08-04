@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from . import config, signature
-from .engine import Engine, get_engine, MALWARE, POTENTIAL_ZERODAY, SAFE, ERROR
+from .engine import Engine, get_engine, MALWARE, SAFE, ERROR
 from .hashdb import HashDB, KNOWN_MALWARE, NOT_IN_DB
 
 # comparison_tag constants (spec §3.5.5)
@@ -42,9 +42,8 @@ class FileResult:
     name: str
     sha256: str | None
     size: int
-    ml_verdict: str                  # MALWARE | POTENTIAL_ZERODAY | SAFE | ERROR
+    ml_verdict: str                  # MALWARE | SAFE | ERROR
     lgbm_prob: float | None = None
-    if_score: float | None = None
     hash_verdict: str | None = None  # KNOWN_MALWARE | NOT_IN_DB | None(=not checked)
     comparison_tag: str | None = None
     error: str | None = None
@@ -58,7 +57,7 @@ class FileResult:
 
     @property
     def ml_flagged(self) -> bool:
-        return self.ml_verdict in (MALWARE, POTENTIAL_ZERODAY)
+        return self.ml_verdict == MALWARE
 
 
 @dataclass
@@ -68,7 +67,6 @@ class ScanSummary:
     skipped_system: int = 0
     errors: int = 0
     malware: int = 0
-    potential_zeroday: int = 0
     safe: int = 0
     flagged_pct: float = 0.0
 
@@ -127,11 +125,10 @@ def comparison_tag(ml_verdict: str, hash_verdict: str | None) -> str | None:
     """Combine the two INDEPENDENT verdicts into a reporting tag.
 
     Returns None when the hash layer didn't run, or the file errored in ML.
-    POTENTIAL_ZERODAY counts as an ML catch (spec table: 'MALWARE / ZERODAY').
     """
     if hash_verdict is None or ml_verdict == ERROR:
         return None
-    ml_flagged = ml_verdict in (MALWARE, POTENTIAL_ZERODAY)
+    ml_flagged = ml_verdict == MALWARE
     known = hash_verdict == KNOWN_MALWARE
     if ml_flagged and known:
         return BOTH_CAUGHT
@@ -147,7 +144,6 @@ def scan_folder(
     folder,
     *,
     engine: Engine | None = None,
-    use_if: bool = False,
     whitelist_enabled: bool = True,
     whitelist_prefixes: list[str] | None = None,
     hash_db: HashDB | None = None,
@@ -164,16 +160,17 @@ def scan_folder(
     """Scan `folder` and return a ScanResult.
 
     engine          : reuse a loaded Engine (else a shared one is created).
-    use_if          : consult the Isolation Forest second layer.
     hash_db         : a HashDB; if None and hash_compare, the default DB is opened.
-    zeroday_hashes  : if given, the headline block is computed over these hashes.
+    zeroday_hashes  : if given, the headline block is computed over these hashes
+                      (a withheld-hash generalization check — unrelated to the
+                      model itself; see _headline()).
     result_cb       : optional callback fired for EVERY scanned (non-whitelisted)
                       file, in scan order — for a UI that wants to grow its
                       table live rather than only after the scan finishes.
-                      flagged_cb fires only for MALWARE/POTENTIAL_ZERODAY.
+                      flagged_cb fires only for MALWARE.
     on_malware      : optional callback to quarantine MALWARE files; returns
                       (quarantined, quarantine_path).
-    check_signature : verify Authenticode on flagged files (recorded only).
+    check_signature : verify Authenticode on every scanned file (recorded only).
     trust_signed    : do not AUTO-quarantine a MALWARE file whose signature is
                       valid and trusted. The verdict is unchanged either way —
                       this gates the action, not the classification.
@@ -184,7 +181,7 @@ def scan_folder(
     t0 = time.time()
 
     if engine is None:
-        engine = get_engine(load_if=True)
+        engine = get_engine()
 
     # Hash layer setup (independent of ML).
     owns_db = False
@@ -225,14 +222,14 @@ def scan_folder(
         summary.scanned += 1
 
         # ML layer (independent) — classify_file reads the bytes once and hashes.
-        ml, sha, size = engine.classify_file(fp, use_if=use_if)
+        ml, sha, size = engine.classify_file(fp)
 
         # Hash layer (independent) — never feeds back into the ML verdict.
         hv = hash_db.verdict(sha) if (hash_active and sha) else None
 
         fr = FileResult(
             path=str(fp), name=fp.name, sha256=sha, size=size,
-            ml_verdict=ml.ml_verdict, lgbm_prob=ml.lgbm_prob, if_score=ml.if_score,
+            ml_verdict=ml.ml_verdict, lgbm_prob=ml.lgbm_prob,
             hash_verdict=hv, comparison_tag=comparison_tag(ml.ml_verdict, hv),
             error=ml.error,
         )
@@ -240,8 +237,6 @@ def scan_folder(
         # Tally.
         if fr.ml_verdict == MALWARE:
             summary.malware += 1
-        elif fr.ml_verdict == POTENTIAL_ZERODAY:
-            summary.potential_zeroday += 1
         elif fr.ml_verdict == SAFE:
             summary.safe += 1
         else:  # ERROR
@@ -249,15 +244,19 @@ def scan_folder(
         if fr.comparison_tag in tag_counts:
             tag_counts[fr.comparison_tag] += 1
 
-        # Authenticode layer (independent) — only for flagged files, since that
-        # is where it matters and it keeps clean scans fast. It NEVER feeds back
-        # into the ML verdict; it only gates the quarantine ACTION below.
-        if check_signature and fr.ml_flagged:
+        # Authenticode layer (independent) — runs on EVERY scanned file, not just
+        # flagged ones, so the UI can report how many SAFE-verdict files are also
+        # independently corroborated by a trusted signature (not just "the model
+        # didn't flag it"). This costs real time (a WinVerifyTrust call per file)
+        # but was deliberately chosen over the faster flagged-only check. It
+        # NEVER feeds back into the ML verdict; it only gates the quarantine
+        # ACTION below for flagged files.
+        if check_signature:
             sig = signature.verify(fr.path)
             fr.signature_status = sig.status
             fr.signature_signer = sig.signer
 
-        # Action: quarantine MALWARE only (POTENTIAL_ZERODAY is reported, not moved).
+        # Action: quarantine MALWARE files.
         if fr.ml_verdict == MALWARE and on_malware is not None:
             if trust_signed and fr.signature_status == signature.TRUSTED:
                 # Validly signed by a chain Windows trusts -> report, do not move.
@@ -280,8 +279,8 @@ def scan_folder(
 
         results.append(fr)
 
-    classified = summary.malware + summary.potential_zeroday + summary.safe
-    flagged = summary.malware + summary.potential_zeroday
+    classified = summary.malware + summary.safe
+    flagged = summary.malware
     summary.flagged_pct = round(100.0 * flagged / classified, 2) if classified else 0.0
 
     # hash_comparison block (spec §3.5.6).
@@ -302,7 +301,6 @@ def scan_folder(
         hash_db.close()
 
     options = {
-        "use_if": use_if,
         "whitelist_enabled": whitelist_enabled,
         "hash_compare": hash_compare,
         "hash_active": hash_active,

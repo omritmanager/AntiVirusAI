@@ -65,7 +65,6 @@ def test_display_verdict_green_only_for_trusted_signature():
     dv = signature.display_verdict
     # Validly signed + not a known sample -> shown green.
     assert dv("MALWARE", signature.TRUSTED, "NOT_IN_DB") == signature.SIGNED_SAFE
-    assert dv("POTENTIAL_ZERODAY", signature.TRUSTED, "NOT_IN_DB") == signature.SIGNED_SAFE
     # Anything less than a trusted signature stays as the model said.
     assert dv("MALWARE", signature.UNSIGNED, "NOT_IN_DB") == "MALWARE"
     assert dv("MALWARE", signature.UNTRUSTED, "NOT_IN_DB") == "MALWARE"
@@ -78,8 +77,6 @@ def test_display_verdict_known_malware_hash_always_wins():
     exact known-sample match must never be masked by a valid signature."""
     assert signature.display_verdict(
         "MALWARE", signature.TRUSTED, "KNOWN_MALWARE") == "MALWARE"
-    assert signature.display_verdict(
-        "POTENTIAL_ZERODAY", signature.TRUSTED, "KNOWN_MALWARE") == "POTENTIAL_ZERODAY"
 
 
 def test_display_verdict_respects_trust_signed_toggle():
