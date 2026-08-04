@@ -38,10 +38,15 @@ def _result_to_dict(r) -> dict:
         "hash_verdict": r.hash_verdict,
         "comparison_tag": r.comparison_tag,
         "lgbm_prob": r.lgbm_prob,
-        "if_score": r.if_score,
         "error": r.error,
         "quarantined": r.quarantined,
         "quarantine_path": r.quarantine_path,
+        # Authenticode layer — recorded side by side with the ML verdict, which
+        # it never changes. quarantine_skipped_reason explains a MALWARE verdict
+        # that was deliberately left in place (validly signed).
+        "signature_status": getattr(r, "signature_status", None),
+        "signature_signer": getattr(r, "signature_signer", None),
+        "quarantine_skipped_reason": getattr(r, "quarantine_skipped_reason", None),
         "explanation": getattr(r, "explanation", None),
     }
 
@@ -60,11 +65,11 @@ def build_report_dict(scan: ScanResult, *, model_name: str = "lgbm_v7_correct.pk
         "config": {
             "folder": scan.folder,
             "lgbm_threshold": config.LGBM_THRESHOLD,
-            "if_enabled": bool(opts.get("use_if", False)),
-            "if_threshold": config.IF_THRESHOLD,
             "whitelist_enabled": bool(opts.get("whitelist_enabled", True)),
             "hash_db": hash_db_path,
             "hash_compare_enabled": bool(opts.get("hash_compare", False)),
+            "signature_check_enabled": bool(opts.get("check_signature", False)),
+            "trust_signed": bool(opts.get("trust_signed", False)),
             "model": model_name,
         },
         "environment": gather_environment(),
@@ -74,7 +79,6 @@ def build_report_dict(scan: ScanResult, *, model_name: str = "lgbm_v7_correct.pk
             "skipped_system": scan.summary.skipped_system,
             "errors": scan.summary.errors,
             "malware": scan.summary.malware,
-            "potential_zeroday": scan.summary.potential_zeroday,
             "safe": scan.summary.safe,
             "flagged_pct": scan.summary.flagged_pct,
         },
@@ -84,16 +88,39 @@ def build_report_dict(scan: ScanResult, *, model_name: str = "lgbm_v7_correct.pk
     return report
 
 
+# Reports must survive an unwritable project directory (read-only network
+# share) — see config.resolve_writable_dir(). A scan that completed should not
+# be thrown away just because its report could not be filed in the usual place.
+LOCAL_FALLBACK_EVALUATION_DIR = config.LOCAL_FALLBACK_ROOT / "evaluation"
+
+
 def default_report_path(scan: ScanResult) -> Path:
     safe_id = scan.scan_id.replace(":", "-")
     return config.EVALUATION_DIR / f"scan_{safe_id}.json"
 
 
 def write_report(scan: ScanResult, output_path=None,
-                 model_name: str = "lgbm_v7_correct.pkl") -> Path:
-    """Write the JSON report and return its path."""
+                 model_name: str | None = None) -> Path:
+    """Write the JSON report and return the path actually written.
+
+    On OSError (permission denied / unreachable share) the report is written to
+    a local per-user directory instead. The RETURNED path is always the real
+    one, so callers report where the file truly landed.
+    """
+    # Default to the model actually loaded, so a report produced under an
+    # AVSCAN_MODEL override never claims it came from the production model.
+    if model_name is None:
+        model_name = config.LGBM_PATH.name
     out = Path(output_path) if output_path else default_report_path(scan)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(build_report_dict(scan, model_name=model_name), f, indent=2)
-    return out
+    payload = build_report_dict(scan, model_name=model_name)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return out
+    except OSError:
+        LOCAL_FALLBACK_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
+        fallback = LOCAL_FALLBACK_EVALUATION_DIR / out.name
+        with open(fallback, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return fallback

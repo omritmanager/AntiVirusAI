@@ -24,9 +24,10 @@ numpy==1.26.4
 # Progress bar (optional; the CLI degrades to plain prints if absent).
 tqdm==4.67.3
 
-# The optional Gemini "explain why" layer (avscan/explain.py) and the right-click
-# Quick Scan popup use ONLY the Python standard library (urllib, winreg, tkinter)
-# — no extra pinned dependency. It needs a Gemini API key at runtime, supplied via
+# The optional Gemini "explain why" layer (avscan/explain.py), the Authenticode
+# signature layer (avscan/signature.py — ctypes against wintrust/crypt32), and the
+# right-click Quick Scan popup use ONLY the Python standard library (urllib,
+# ctypes, winreg, tkinter) — no extra pinned dependency. It needs a Gemini API key at runtime, supplied via
 # the GEMINI_API_KEY environment variable (recommended) or config/gemini_key.txt.
 
 # GUI toolkit (spec §11). Not required for the CLI or the engine; install for

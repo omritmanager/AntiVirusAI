@@ -11,8 +11,8 @@ Checks (in order):
      Hard-fails naming the offending package.
   3. EMBER FeatureHasher patch present (source inspection + a live extraction of
      a real PE that would raise ValueError if unpatched).
-  4. Model assets exist and load (lgbm_v7_correct.pkl, isolation_forest.pkl,
-     thresholds.json, if_config.json). Warns loudly if the leaky model is present.
+  4. Model assets exist and load (lgbm_v7_correct.pkl, thresholds.json). Warns
+     loudly if the leaky model is present.
   5. Regression test: predict the held-out test set and assert F1 >= 0.98
      (expected ~0.9936). Catches silent model corruption.
 
@@ -140,38 +140,31 @@ def check_ember_patch() -> Check:
 def check_assets() -> list[Check]:
     checks: list[Check] = []
 
-    # Primary model must exist and load.
+    # Primary model must exist and load. The label reports the file ACTUALLY
+    # loaded, not the default name — otherwise an AVSCAN_MODEL override would
+    # silently report the production filename while scoring with something else.
+    label = f"model: {config.LGBM_PATH.name}"
+    overridden = config.LGBM_PATH != config.MODELS_DIR / "lgbm_v7_correct.pkl"
     if not config.LGBM_PATH.exists():
-        checks.append(Check("model: lgbm_v7_correct.pkl", False, "file missing"))
+        checks.append(Check(label, False, "file missing"))
     else:
         try:
             with open(config.LGBM_PATH, "rb") as f:
                 pickle.load(f)
-            checks.append(Check("model: lgbm_v7_correct.pkl", True, "loads"))
+            checks.append(Check(label, True,
+                                "loads (AVSCAN_MODEL override active — NOT the "
+                                "production model)" if overridden else "loads",
+                                warning=overridden))
         except Exception as e:
-            checks.append(Check("model: lgbm_v7_correct.pkl", False, f"load failed: {e}"))
+            checks.append(Check(label, False, f"load failed: {e}"))
 
     # Leaky model: warn loudly if present (engine refuses to load it).
     if config.LGBM_LEAKY_PATH.exists():
         checks.append(Check("leaky model present", True, warning=True,
                             detail="lgbm_v7.pkl exists (data leakage) - engine refuses to load it"))
 
-    # Isolation Forest (optional layer).
-    if config.IF_PATH.exists():
-        try:
-            with open(config.IF_PATH, "rb") as f:
-                pickle.load(f)
-            checks.append(Check("model: isolation_forest.pkl", True, "loads"))
-        except Exception as e:
-            checks.append(Check("model: isolation_forest.pkl", True, warning=True,
-                                detail=f"present but load failed: {e}"))
-    else:
-        checks.append(Check("model: isolation_forest.pkl", True, warning=True,
-                            detail="absent — zero-day layer unavailable"))
-
     # Config JSONs.
-    for label, p in [("thresholds.json", config.THRESHOLDS_JSON),
-                     ("if_config.json", config.IF_CONFIG_JSON)]:
+    for label, p in [("thresholds.json", config.THRESHOLDS_JSON)]:
         checks.append(Check(f"asset: {label}", p.exists(),
                             "present" if p.exists() else "missing (using validated defaults)",
                             warning=not p.exists()))

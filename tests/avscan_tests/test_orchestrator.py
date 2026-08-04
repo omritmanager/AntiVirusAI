@@ -1,7 +1,7 @@
 """Orchestrator tests (spec §13): comparison_tag table, whitelist, integration."""
 import os
 
-from avscan.engine import MALWARE, POTENTIAL_ZERODAY, SAFE, ERROR
+from avscan.engine import MALWARE, SAFE, ERROR
 from avscan.hashdb import HashDB, KNOWN_MALWARE, NOT_IN_DB
 from avscan import orchestrator as orch
 from avscan.orchestrator import (comparison_tag, is_whitelisted,
@@ -16,10 +16,7 @@ def test_comparison_tag_all_four_combinations():
     assert comparison_tag(SAFE, NOT_IN_DB) == BOTH_CLEAR
 
 
-def test_comparison_tag_zeroday_and_edge_cases():
-    # POTENTIAL_ZERODAY counts as an ML catch
-    assert comparison_tag(POTENTIAL_ZERODAY, NOT_IN_DB) == ML_ONLY_CATCH
-    assert comparison_tag(POTENTIAL_ZERODAY, KNOWN_MALWARE) == BOTH_CAUGHT
+def test_comparison_tag_edge_cases():
     # no tag when hash layer didn't run, or the file errored
     assert comparison_tag(SAFE, None) is None
     assert comparison_tag(ERROR, KNOWN_MALWARE) is None
@@ -53,7 +50,7 @@ def test_integration_mixed_folder_counts(mixed_folder, engine):
     assert s.errors == 1                     # tiny.exe
     # self-consistency
     assert s.total_files_seen == s.scanned + s.skipped_system
-    assert s.malware + s.potential_zeroday + s.safe + s.errors == s.scanned
+    assert s.malware + s.safe + s.errors == s.scanned
 
 
 def test_integration_hash_tags(mixed_folder, engine, tiny_db):

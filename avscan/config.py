@@ -12,6 +12,7 @@ calibrated with) and fall back to the validated literals if a file is missing.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -23,10 +24,18 @@ ROOT = AVSCAN_DIR.parent
 
 MODELS_DIR = ROOT / "models" / "v7"
 LGBM_PATH = MODELS_DIR / "lgbm_v7_correct.pkl"          # PRIMARY model — USE THIS
+
+# Optional override for EVALUATING a candidate model without swapping the
+# production file (set AVSCAN_MODEL to a .pkl path). The startup self-check
+# still runs its full regression gate against whatever is loaded, so a bad
+# candidate is still refused rather than silently trusted. Relative paths
+# resolve against the project root. Never set this in normal use.
+_model_override = (os.environ.get("AVSCAN_MODEL") or "").strip()
+if _model_override:
+    _p = Path(_model_override)
+    LGBM_PATH = _p if _p.is_absolute() else (ROOT / _p)
 LGBM_LEAKY_PATH = MODELS_DIR / "lgbm_v7.pkl"            # data leakage — REFUSE
-IF_PATH = MODELS_DIR / "isolation_forest.pkl"
 THRESHOLDS_JSON = MODELS_DIR / "thresholds.json"
-IF_CONFIG_JSON = MODELS_DIR / "if_config.json"
 
 # Regression-test arrays for the startup self-check (§9.4)
 SPLITS_CLEAN_DIR = ROOT / "data" / "splits_clean"
@@ -49,6 +58,32 @@ QUARANTINE_MANIFEST = QUARANTINE_DIR / "manifest.json"
 # Reports (§8)
 EVALUATION_DIR = ROOT / "evaluation"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Writable-location fallback.
+# The project directory is not always writable: it may live on a read-only
+# network share (e.g. a VM reaching the host over \\host\Final Project), where
+# every write the app needs — quarantine copies, scan reports — fails with
+# PermissionError mid-scan. Anything the app MUST be able to write falls back
+# to a local per-user directory on the system drive instead of crashing.
+# ─────────────────────────────────────────────────────────────────────────────
+LOCAL_FALLBACK_ROOT = Path(
+    os.environ.get("LOCALAPPDATA", r"C:\ProgramData")) / "AntivirusAI_V7"
+
+
+def resolve_writable_dir(preferred: Path, fallback: Path) -> tuple[Path, bool]:
+    """Return (usable_dir, used_fallback). Probes `preferred` with a real write
+    (mkdir alone succeeds on some shares that then refuse file creation), and
+    on any OSError falls back to `fallback`."""
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        probe = preferred / ".write_test"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return preferred, False
+    except OSError:
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback, True
+
 # User-editable config files
 CONFIG_DIR = ROOT / "config"
 WHITELIST_JSON = CONFIG_DIR / "whitelist.json"
@@ -61,7 +96,6 @@ GEMINI_KEY_FILE = CONFIG_DIR / "gemini_key.txt"  # optional; git-ignored
 TEMPORAL_INDICES = [1557, 1558, 1599, 1602, 1609, 1610, 1612, 1613, 1616, 1617]
 EXPECTED_DIM = 2381
 DEFAULT_LGBM_THRESHOLD = 0.40
-DEFAULT_IF_THRESHOLD = 0.3694358641837102
 VALID_EXT = {".exe", ".dll", ".sys", ".scr", ".com", ".ocx", ".cpl", ".drv"}
 MIN_FILE_BYTES = 100  # files smaller than this are treated as ERROR (per reference)
 
@@ -106,13 +140,18 @@ DEFAULT_WHITELIST_PREFIXES = [
 
 # Behavioral defaults (§5, §6, §7) — overridden by config/settings.json then CLI.
 DEFAULT_SETTINGS = {
-    "use_if": False,            # Isolation Forest off by default (§7)
     "whitelist_enabled": True,  # skip system files by default (§5)
     "auto_quarantine": True,    # auto-quarantine MALWARE by default (§6, §10)
     "hash_compare": True,       # include hash comparison by default (§3.5)
     "xor_quarantine": True,     # XOR-neutralize quarantined files (§6)
     "xor_key": XOR_KEY_DEFAULT,
     "hash_db_path": str(BASELINE_SQLITE),
+    # Authenticode layer (avscan/signature.py). Independent of the ML verdict:
+    # it NEVER changes it, but a validly signed file is not AUTO-quarantined
+    # (still reported). Guards against the model's known false positives on
+    # signed installers/Go binaries. Set False to quarantine regardless.
+    "check_signature": True,    # verify Authenticode on flagged files
+    "trust_signed": True,       # skip auto-quarantine for validly signed files
     # Gemini explanation layer (opt-in; needs an API key — see get_gemini_api_key)
     "explain_enabled": True,        # try to produce a "why" for flagged files
     "gemini_model": DEFAULT_GEMINI_MODEL,
@@ -133,23 +172,22 @@ def _read_json(path: Path):
 
 
 def load_lgbm_threshold() -> float:
-    """LightGBM threshold from thresholds.json 'recommended', else 0.40 (§2)."""
+    """LightGBM threshold: AVSCAN_THRESHOLD env override, else thresholds.json
+    'recommended', else 0.40 (§2)."""
+    env = (os.environ.get("AVSCAN_THRESHOLD") or "").strip()
+    if env:
+        try:
+            val = float(env)
+            if 0.0 < val < 1.0:
+                return val
+        except ValueError:
+            pass  # unparseable -> fall through to the validated sources below
     data = _read_json(THRESHOLDS_JSON)
     if isinstance(data, dict):
         val = data.get("recommended")
         if isinstance(val, (int, float)):
             return float(val)
     return DEFAULT_LGBM_THRESHOLD
-
-
-def load_if_threshold() -> float:
-    """IF threshold from if_config.json 'anomaly_threshold', else 0.3694... (§2)."""
-    data = _read_json(IF_CONFIG_JSON)
-    if isinstance(data, dict):
-        val = data.get("anomaly_threshold")
-        if isinstance(val, (int, float)):
-            return float(val)
-    return DEFAULT_IF_THRESHOLD
 
 
 def load_whitelist() -> list[str]:
@@ -203,4 +241,3 @@ def get_gemini_api_key() -> str | None:
 
 # Convenience module-level values (loaded once at import; loaders stay available).
 LGBM_THRESHOLD = load_lgbm_threshold()
-IF_THRESHOLD = load_if_threshold()
