@@ -23,7 +23,7 @@ JUNK_MALWARE_BYTES = b"x" * 500
 @pytest.fixture(scope="session")
 def engine() -> Engine:
     """One loaded Engine shared across the whole suite (model load is slow)."""
-    return Engine(load_if=True)
+    return Engine()
 
 
 @pytest.fixture(scope="session")

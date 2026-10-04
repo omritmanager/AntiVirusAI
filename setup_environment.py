@@ -1,7 +1,7 @@
-"""
-setup_environment.py — Reproduce the LOCKED AntivirusAI V7 environment (spec §0).
+﻿"""
+setup_environment.py - Reproduce the LOCKED AntivirusAI V7 environment (spec section 0).
 
-What it does (idempotent — safe to run twice):
+What it does (idempotent - safe to run twice):
   1. Installs the pinned core dependencies (numpy, scikit-learn, lightgbm, lief,
      tqdm) into the CURRENT interpreter (sys.executable).
   2. Installs EMBER from the pinned git commit.
@@ -29,7 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ── Locked specification (must match avscan/config.py and requirements.txt) ──
+# -- Locked specification (must match avscan/config.py and requirements.txt) --
 PYTHON_PREFIX = "3.11"
 EMBER_COMMIT = "d97a0b523de02f3fe5ea6089d080abacab6ee931"
 EMBER_GIT = f"git+https://github.com/elastic/ember.git@{EMBER_COMMIT}"
@@ -52,7 +52,7 @@ VERIFY = {
 GUI_PIN = "PySide6==6.8.1.1"
 
 
-# ── Pretty logging ───────────────────────────────────────────────────────────
+# -- Pretty logging -----------------------------------------------------------
 def step(msg: str) -> None:
     print(f"\n=== {msg} ===")
 
@@ -69,7 +69,7 @@ def fail(msg: str) -> None:
     print(f"  [FAIL] {msg}")
 
 
-# ── pip helpers ──────────────────────────────────────────────────────────────
+# -- pip helpers --------------------------------------------------------------
 def pip_install(*args: str) -> bool:
     """Run `pip install <args>` in the current interpreter. True on success."""
     cmd = [sys.executable, "-m", "pip", "install", *args]
@@ -77,7 +77,7 @@ def pip_install(*args: str) -> bool:
     return subprocess.run(cmd).returncode == 0
 
 
-# ── EMBER patch ──────────────────────────────────────────────────────────────
+# -- EMBER patch --------------------------------------------------------------
 # The single-bracket form raises `ValueError: Samples can not be a single
 # string` under scikit-learn 1.3.2; the double-bracket form is correct.
 _DOUBLE_RE = re.compile(
@@ -115,11 +115,11 @@ def apply_ember_patch(path: Path | None = None) -> str:
     patched = _SINGLE_RE.sub(r"\1[[raw_obj['entry']]]\2", src, count=1)
     path.write_text(patched, encoding="utf-8")
     if not _DOUBLE_RE.search(path.read_text(encoding="utf-8")):
-        raise RuntimeError("Patch write did not take effect — aborting.")
+        raise RuntimeError("Patch write did not take effect - aborting.")
     return "patched"
 
 
-# ── Verification ─────────────────────────────────────────────────────────────
+# -- Verification -------------------------------------------------------------
 def verify_versions() -> bool:
     all_ok = True
     for pip_name, (import_name, expected) in VERIFY.items():
@@ -151,7 +151,7 @@ def verify_featurehasher() -> bool:
         return False
 
 
-# ── Main flow ────────────────────────────────────────────────────────────────
+# -- Main flow ----------------------------------------------------------------
 def run(verify_only: bool, install_gui: bool) -> int:
     print("=" * 64)
     print("AntivirusAI V7 - environment setup")
@@ -163,7 +163,7 @@ def run(verify_only: bool, install_gui: bool) -> int:
     if sys.version.split()[0].startswith(PYTHON_PREFIX):
         ok(f"Python {PYTHON_PREFIX}.x")
     else:
-        warn(f"Python is not {PYTHON_PREFIX}.x — locked baseline is 3.11. "
+        warn(f"Python is not {PYTHON_PREFIX}.x - locked baseline is 3.11. "
              "Predictions were validated only on 3.11.")
 
     if not verify_only:
@@ -171,7 +171,7 @@ def run(verify_only: bool, install_gui: bool) -> int:
         for name, ver in CORE_PINS.items():
             if not pip_install(f"{name}=={ver}"):
                 fail(f"Could not install {name}=={ver}. "
-                     "STOPPING — version fidelity is required; not substituting.")
+                     "STOPPING - version fidelity is required; not substituting.")
                 return 1
             ok(f"{name}=={ver}")
 
@@ -227,7 +227,7 @@ def run(verify_only: bool, install_gui: bool) -> int:
         ok("Environment is correctly locked and patched.")
         print("\nNext: python -m avscan selfcheck")
         return 0
-    fail("Environment is NOT fully valid — see messages above.")
+    fail("Environment is NOT fully valid - see messages above.")
     return 1
 
 

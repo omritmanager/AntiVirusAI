@@ -60,6 +60,22 @@ def test_classify_vector_does_not_mutate_input(engine):
     assert np.all(vec[config.TEMPORAL_INDICES] == 1.0)
 
 
+def test_classify_with_vector_agrees_with_the_separate_calls(engine, benign_exes):
+    """One extraction must give exactly what two separate calls used to."""
+    for exe in benign_exes[:3]:
+        data = exe.read_bytes()
+        res, vec = engine.classify_with_vector(data)
+        assert res.ml_verdict == engine.classify_bytes(data).ml_verdict
+        assert np.array_equal(vec, engine.processed_vector(data))
+
+
+def test_classify_with_vector_returns_no_vector_on_error(engine):
+    for bad in (b"", b"MZ", None):
+        res, vec = engine.classify_with_vector(bad)
+        assert res.ml_verdict == ERROR
+        assert vec is None
+
+
 def test_sha256_helpers_consistent(benign_exes):
     from avscan.engine import sha256_file
     data = benign_exes[0].read_bytes()

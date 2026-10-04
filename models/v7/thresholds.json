@@ -1,12 +1,12 @@
 {
   "default": 0.5,
-  "best_f1": 0.40000000000000013,
-  "low_fpr": 0.40000000000000013,
-  "recommended": 0.40000000000000013,
+  "best_f1": 0.22,
+  "low_fpr": 0.3,
+  "recommended": 0.225,
   "description": {
     "default": "Standard 0.5 threshold",
-    "best_f1": "Maximizes F1 on val set (F1=0.9945)",
-    "low_fpr": "Best F1 while FPR<1% on val (F1=0.9945)",
-    "recommended": "Use this in production"
+    "best_f1": "Maximizes F1 on official test_balanced for this model (F1=0.993424 at 0.22)",
+    "low_fpr": "Lower FPR (0.74%) at a small F1 cost, if fewer false alarms matters more than max F1",
+    "recommended": "2026-08-05: promoted lgbm_v7_correct_candidate.pkl (augmented benign-corpus retrain) to production. 0.225 is the recall-matched threshold vs the prior production model (recall 0.9926, same as before) -- NOT the same as this model's own best-F1 point. Validated: F1=0.993286 on official test_balanced (min 0.98 gate), vendor-holdout FPR 44.70%->13.64%, real clean-folder test 45.7% fewer false alarms (n=13,090, McNemar p~0). See models/v7/validation_report_augmented.json for the full gate suite."
   }
 }

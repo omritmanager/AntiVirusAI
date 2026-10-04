@@ -51,3 +51,6 @@ models/v7/*
 !models/v7/lgbm_v7_correct.pkl
 !models/v7/thresholds.json
 !models/v7/if_config.json
+
+# ---- Office lock/temp files ----
+~$*

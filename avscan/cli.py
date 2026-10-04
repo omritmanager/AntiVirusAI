@@ -2,7 +2,7 @@
 cli.py — Command-line interface (spec §10).
 
 Commands:
-  avscan scan <folder> [--use-if] [--no-whitelist] [--quarantine|--report-only]
+  avscan scan <folder> [--no-whitelist] [--quarantine|--report-only]
                        [--hash-db <path>] [--hash-compare|--no-hash-compare]
                        [--output <path.json>] [--skip-selfcheck]
   avscan demo-zeroday <folder> [--hash-db <path>] [--skip-selfcheck]
@@ -65,8 +65,16 @@ def _print_flagged(fr) -> None:
     tag = f"[{fr.comparison_tag}]" if fr.comparison_tag else ""
     if fr.ml_verdict == "MALWARE":
         print(f"  MALWARE           {fr.name:<45} p={fr.lgbm_prob:.3f} {tag}")
-    elif fr.ml_verdict == "POTENTIAL_ZERODAY":
-        print(f"  POTENTIAL_ZERODAY {fr.name:<45} if={fr.if_score:.3f} {tag}")
+    elif fr.ml_verdict == "ERROR":
+        # Treated as flagged under the fail-closed policy (couldn't be read or
+        # parsed, so we don't get to assume it's safe) — still surfaced here so
+        # a quarantined ERROR file isn't silently invisible in the CLI output.
+        print(f"  ERROR (treated as MALWARE) {fr.name:<30} {fr.error or 'unknown error'}")
+    # Surface the signature counter-signal right where the user sees the alarm,
+    # so a likely false positive on a signed program is obvious immediately.
+    if fr.signature_status == "TRUSTED":
+        print(f"                    -> signed by {fr.signature_signer or 'a trusted publisher'}"
+              f"{' (NOT quarantined)' if fr.quarantine_skipped_reason else ''}")
 
 
 def _ensure_selfcheck(skip: bool) -> bool:
@@ -119,15 +127,20 @@ def cmd_scan(args) -> int:
         if do_quarantine else None
     on_malware = quarantine.quarantine_for_result if quarantine else None
 
+    settings = config.load_settings()
+    check_signature = settings.get("check_signature", True) and not args.no_signature
+    trust_signed = settings.get("trust_signed", True) and not args.no_trust_signed
+
     print(f"\nScanning: {folder}")
-    print(f"  IF layer: {args.use_if} | whitelist: {not args.no_whitelist} | "
+    print(f"  whitelist: {not args.no_whitelist} | "
           f"hash-compare: {hash_compare} | action: "
-          f"{'quarantine' if do_quarantine else 'report-only'}\n")
+          f"{'quarantine' if do_quarantine else 'report-only'}")
+    print(f"  signature check: {check_signature} | "
+          f"skip quarantine for signed: {trust_signed}\n")
 
     progress = _Progress(enabled=True)
     scan = scan_folder(
         folder,
-        use_if=args.use_if,
         whitelist_enabled=not args.no_whitelist,
         hash_db=hash_db,
         hash_compare=hash_compare,
@@ -135,6 +148,8 @@ def cmd_scan(args) -> int:
         flagged_cb=_print_flagged,
         error_cb=lambda e: None,
         on_malware=on_malware,
+        check_signature=check_signature,
+        trust_signed=trust_signed,
     )
     progress.close()
     if hash_db:
@@ -146,14 +161,14 @@ def cmd_scan(args) -> int:
     out = report_mod.write_report(scan, output_path=args.output)
     _print_summary(scan, out)
 
-    flagged = scan.summary.malware + scan.summary.potential_zeroday
+    flagged = scan.summary.malware
     return EXIT_MALWARE if flagged > 0 else EXIT_CLEAN
 
 
 def _attach_explanations(scan, cap: int = 10) -> None:
     """Fill FileResult.explanation for flagged files via Gemini (needs a key).
     Bounded by `cap` to limit API cost. Never raises."""
-    from .engine import get_engine, MLResult, MALWARE, POTENTIAL_ZERODAY
+    from .engine import get_engine, MLResult, MALWARE
     from . import explain
 
     settings = config.load_settings()
@@ -161,18 +176,22 @@ def _attach_explanations(scan, cap: int = 10) -> None:
         print("\nNOTE: --explain requested but no Gemini API key is set (or it is "
               "disabled). Set GEMINI_API_KEY to enable explanations.")
         return
-    flagged = [r for r in scan.results if r.ml_verdict in (MALWARE, POTENTIAL_ZERODAY)]
+    flagged = [r for r in scan.results if r.ml_verdict == MALWARE]
     if not flagged:
         return
-    engine = get_engine(load_if=True)
+    engine = get_engine()
     n = min(len(flagged), cap)
     print(f"\nGenerating explanations for {n} flagged file(s) (Gemini)...")
     for r in flagged[:cap]:
         try:
             with open(r.path, "rb") as f:
                 data = f.read()
-            ml = MLResult(r.ml_verdict, lgbm_prob=r.lgbm_prob, if_score=r.if_score)
-            out = explain.explain_bytes(engine, data, ml, settings=settings)
+            ml = MLResult(r.ml_verdict, lgbm_prob=r.lgbm_prob)
+            out = explain.explain_bytes(engine, data, ml, settings=settings,
+                                        hash_verdict=r.hash_verdict,
+                                        quarantined=r.quarantined,
+                                        signature_status=r.signature_status,
+                                        signature_signer=r.signature_signer)
             r.explanation = out.get("summary")
             print(f"  {r.name}: {(r.explanation or '')[:110]}...")
         except Exception:
@@ -181,14 +200,14 @@ def _attach_explanations(scan, cap: int = 10) -> None:
 
 def cmd_quickscan(args) -> int:
     from . import quickscan as qs
-    from .engine import MALWARE, POTENTIAL_ZERODAY
+    from .engine import ERROR, MALWARE
 
-    res = qs.quick_scan(args.file, use_if=not args.no_if, do_explain=not args.no_explain)
+    res = qs.quick_scan(args.file, do_explain=not args.no_explain)
     if args.text:
         qs._print_text(res)
     else:
         qs.show_popup(res)
-    return EXIT_MALWARE if res["ml_verdict"] in (MALWARE, POTENTIAL_ZERODAY) else EXIT_CLEAN
+    return EXIT_MALWARE if res["ml_verdict"] in (MALWARE, ERROR) else EXIT_CLEAN
 
 
 def cmd_demo_zeroday(args) -> int:
@@ -218,7 +237,7 @@ def cmd_demo_zeroday(args) -> int:
     print(f"\nDemo (SHA-256 vs ML) on: {folder}\n")
     progress = _Progress(enabled=True)
     scan = scan_folder(
-        folder, use_if=args.use_if, whitelist_enabled=False,
+        folder, whitelist_enabled=False,
         hash_db=hash_db, hash_compare=True,
         zeroday_hashes=zeroday if zeroday else None,
         progress_cb=progress,
@@ -275,7 +294,6 @@ def _print_summary(scan, out_path) -> None:
     print(f"  Scanned:           {s.scanned}")
     print(f"  Skipped (system):  {s.skipped_system}")
     print(f"  MALWARE:           {s.malware}")
-    print(f"  POTENTIAL_ZERODAY: {s.potential_zeroday}")
     print(f"  SAFE:              {s.safe}")
     print(f"  Errors:            {s.errors}")
     print(f"  Flagged:           {s.flagged_pct:.2f}%")
@@ -312,7 +330,7 @@ def _print_demo_table(scan) -> None:
               f"<- model generalizes")
     else:
         files = hc.get("files", {})
-        flagged = scan.summary.malware + scan.summary.potential_zeroday
+        flagged = scan.summary.malware
         print(f"  Files scanned:            {scan.summary.scanned}")
         print(f"  (No files matched the withheld zero-day hash set.)")
         print(f"  ML flagged:               {flagged}")
@@ -327,7 +345,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sc = sub.add_parser("scan", help="scan a folder")
     sc.add_argument("folder")
-    sc.add_argument("--use-if", action="store_true", help="enable Isolation Forest layer")
     sc.add_argument("--no-whitelist", action="store_true", help="do not skip system files")
     g = sc.add_mutually_exclusive_group()
     g.add_argument("--quarantine", action="store_true", help="quarantine MALWARE (default)")
@@ -335,6 +352,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--hash-db", default=None, help="path to baseline SQLite DB")
     sc.add_argument("--hash-compare", action="store_true", help="(default on) include comparison")
     sc.add_argument("--no-hash-compare", action="store_true", help="disable hash comparison")
+    sc.add_argument("--no-signature", action="store_true",
+                    help="skip Authenticode verification of flagged files")
+    sc.add_argument("--no-trust-signed", action="store_true",
+                    help="quarantine flagged MALWARE even if validly signed")
     sc.add_argument("--output", default=None, help="report JSON path")
     sc.add_argument("--explain", action="store_true",
                     help="add a Gemini 'why' to flagged files (needs GEMINI_API_KEY)")
@@ -345,13 +366,11 @@ def build_parser() -> argparse.ArgumentParser:
     qs.add_argument("file", help="path to the file to scan")
     qs.add_argument("--text", action="store_true", help="print result instead of a popup")
     qs.add_argument("--no-explain", action="store_true", help="skip the Gemini explanation")
-    qs.add_argument("--no-if", action="store_true", help="disable the Isolation Forest layer")
     qs.set_defaults(func=cmd_quickscan)
 
     dz = sub.add_parser("demo-zeroday", help="SHA-256 vs ML headline table")
     dz.add_argument("folder")
     dz.add_argument("--hash-db", default=None)
-    dz.add_argument("--use-if", action="store_true")
     dz.add_argument("--skip-selfcheck", action="store_true")
     dz.set_defaults(func=cmd_demo_zeroday)
 
