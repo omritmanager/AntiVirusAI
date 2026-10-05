@@ -54,3 +54,15 @@ models/v7/*
 
 # ---- Office lock/temp files ----
 ~$*
+
+# ---- Non-code material (documents, presentations, local reports) ----
+*.docx
+*.pptx
+*.pdf
+HLD/
+docs/
+reports/
+linkedin/
+
+# ---- Nested clone of this repo (not a submodule) ----
+AntiVirusAI/
