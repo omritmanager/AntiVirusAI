@@ -1,9 +1,8 @@
 {
   "description": "System-file whitelist (spec §5). Files whose absolute path starts with any of these prefixes (case-insensitive) are SKIPPED and tallied as SKIPPED_SYSTEM, never sent to the engine. Toggle off with --no-whitelist (CLI) or the GUI checkbox to scan System32 for the sanity-check demo.",
   "prefixes": [
-    "C:\\Windows\\System32",
-    "C:\\Windows\\SysWOW64",
-    "C:\\Windows\\WinSxS"'
-    "C:\\Users\\omri9\\Desktop\\School"
+    "C:\Windows\System32",
+    "C:\Windows\SysWOW64",
+    "C:\Windows\WinSxS"
   ]
 }
